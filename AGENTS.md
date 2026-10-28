@@ -120,3 +120,13 @@ of it. Full standard: `../craftrules/standards/never-crash.md`
 `geom`, `color`, `raster`, `tiff` (L0) → `raw`, `codecs`, `meta`, `develop` (L1) → `pipeline` → `catalog` → `engine`
 → `ui-egui`, `mcp` (L5) → apps `lightcraft` (desktop), `lightcraft-cli` (render/commands/MCP). `scenes` generates demo
 photos. `xtask` = tooling (`ci`, `layers`, `assets`, `parity`, `wasm`, `corpus`, `stats`).
+
+## Repository-specific deterministic quality contract (2026-10-26)
+
+**Project:** Rust native application workspace.
+
+**Engineering requirements:** Preserve compatibility with workspace APIs, UI behavior and launch/build pipelines; add component tests.
+
+**Verification commands:** cargo fmt --all -- --check; cargo metadata --locked --no-deps --format-version 1; targeted cargo test.
+
+Execute applicable checks before claiming completion and report the output honestly. Tests must cover behavior, edge cases and failures. Never delete, skip or weaken tests, quality thresholds or CI for a green result. Review changes to policies, `AGENTS.md`, `QUALITY_GATES.md` and workflows. Make `quality` required in protected branches. Report missing dependencies and failing legacy tests, never hide them. These instructions extend (do not replace) existing rules.
