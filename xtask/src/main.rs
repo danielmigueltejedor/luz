@@ -2,18 +2,34 @@
 //!
 //! Pure Rust (std + serde_json; flate2/brotli for the web bundle). External tools (`cargo`, `curl`, `tar`) are
 //! invoked through `std::process::Command`.
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod assets;
 mod bench;
+mod ci_lock;
+mod ci_quick;
+mod ci_report;
 mod ico;
 mod layers;
 mod parity;
+mod roots;
 mod stats;
 mod version;
 mod web;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+
+mod ci;
+mod corpus;
+mod raw_samples;
+mod wasm;
+
+use ci::{available_ram_mb, ci_jobs, cmd_ci, total_ram_gb};
+use corpus::cmd_corpus;
+use layers::cmd_layers;
+use wasm::cmd_wasm;
 
 const USAGE: &str = "\
 usage: cargo xtask <command>
@@ -26,17 +42,35 @@ commands:
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
   layers          enforce the crate dependency layering (plan/architecture.md §3)
+  roots           every production crate root carries #![forbid(unsafe_code)] and the six-lint
+                  deny list (AGENTS.md; crates/sysmem is exempt from the forbid only)
   parity [--write]
-                  check docs/parity.md (every cmd:/ctl: id and path it cites exists) and print the
+                  check docs/parity-checklist.md (every cmd:/ctl: id and path it cites exists) and print the
                   Lightroom parity summary; --write refreshes the summary table in the document
-  wasm            cargo check --target wasm32-unknown-unknown for the wasm-safe crates (+ the web app)
+  wasm            cargo check --target wasm32-unknown-unknown for the wasm-safe crates (+ the web app), in one call
   web [--serve [port]] [--dev]
-                  build the browser app (apps/lightcraft-web) into <target>/web/;
+                  build the browser app (apps/lightcraft-web) into <target>/web-site/;
                   --serve serves it on http://127.0.0.1:<port> (default 8080)
-  ci              fmt --check, clippy -D warnings, test, parity refs, layers, assets, wasm (stops at first failure)
+  ci [--hardware] [--summary-md] [--quick [--base REF]]
+                  fmt --check, clippy -D warnings, heif, test, GPU probe, parity refs, layers, assets, roots, wasm
+                  (stops at first failure). Tests run under cargo test (cargo nextest with
+                  LIGHTCRAFT_NEXTEST=1), without examples, then doctests with cargo test --doc; after
+                  them it prints the translation gaps report (never a failure). Writes
+                  target/ci/report.json (machine, GPU adapters, data,
+                  steps, skipped tests) and target/ci/summary.md; --hardware also runs the GPU tests on
+                  every backend with a hardware adapter; --summary-md prints the Markdown summary.
+                  --quick: only what the changes since the merge base with origin/main (or REF) can
+                  break: clippy, the changed packages' tests, and heif / parity / wasm when they apply.
+                  One ci runs at a time per machine; others wait (LIGHTCRAFT_CI_SLOTS=N for N at once,
+                  LIGHTCRAFT_CI_LOCK=off to skip the lock)
   corpus [--download]
-                  show where test corpora live; --download fetches PngSuite and CC0 raw samples (raw.pixls.us) into corpus/
+                  show where test corpora live; --download fetches PngSuite and CC0 raw samples (raw.pixls.us) into corpus/ and checks their sha256
   stats [--exact] count tests and lines per crate (--exact: ask the test harness via `-- --list`)
+  raw-frame [--json] FILE…
+                  measure where each raw's embedded camera JPEG sits in its sensor data, which edge bands hold no
+                  picture and what the decoder's crop keeps beyond the camera frame (any make with a full-size
+                  embedded JPEG); print image-area entries for Nikon bodies that record no crop (MEASURED_BODIES in
+                  crates/raw/src/vendor/nef.rs)
 ";
 
 fn main() -> ExitCode {
@@ -46,14 +80,16 @@ fn main() -> ExitCode {
         Some("ico") => ico::run(&rest),
         Some("version") => version::run(&root(), &rest),
         Some("layers") => cmd_layers(),
+        Some("roots") => roots::run(),
         Some("assets") => assets::run(&root()),
         Some("bench") => bench::run(&root(), &rest),
         Some("parity") => parity::run(&root(), rest.contains(&"--write")),
         Some("wasm") => cmd_wasm(),
         Some("web") => web::run(&rest),
-        Some("ci") => cmd_ci(),
+        Some("ci") => cmd_ci(&rest),
         Some("corpus") => cmd_corpus(rest.contains(&"--download")),
         Some("stats") => stats::run(&root(), rest.contains(&"--exact")),
+        Some("raw-frame") => cmd_raw_frame(&rest),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
             Ok(())
@@ -69,18 +105,63 @@ fn main() -> ExitCode {
     }
 }
 
+/// `cargo xtask raw-frame FILE…`: runs the `raw_frame` example of `lightcraft-engine` on the files.
+fn cmd_raw_frame(files: &[&str]) -> Result<(), String> {
+    if files.is_empty() {
+        return Err("raw-frame needs one or more raw files (several per camera, with detail across the frame)".into());
+    }
+    eprintln!("$ cargo run --release -p lightcraft-engine --example raw_frame -- {}", files.join(" "));
+    let status = cargo()
+        .args(["run", "--release", "-q", "-p", "lightcraft-engine", "--example", "raw_frame", "--"])
+        .args(files)
+        .status()
+        .map_err(|e| format!("raw_frame: {e}"))?;
+    if status.success() { Ok(()) } else { Err("raw_frame failed".into()) }
+}
+
 /// Workspace root (parent of the xtask crate).
 pub fn root() -> PathBuf {
     // `cargo run` sets it at run time; prefer that over the compile-time value, which goes stale
     // when the checkout moves and the cached xtask binary isn't rebuilt
-    let dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).filter(|d| d.join("Cargo.toml").is_file());
-    let dir = dir.unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    dir.parent().expect("xtask has a parent dir").to_path_buf()
+    workspace_root(std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).filter(|d| d.join("Cargo.toml").is_file()), env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The workspace root for an xtask-crate directory. A runtime manifest dir (already checked to
+/// carry Cargo.toml) wins only when it has a parent: a filesystem root or an empty path names no
+/// crate below a workspace, and there is no directory above it. The compile-time fallback
+/// (`<workspace>/xtask`) always has a parent; without one the crate dir itself is the best
+/// remaining answer.
+fn workspace_root(runtime_manifest_dir: Option<PathBuf>, compile_time_manifest_dir: &str) -> PathBuf {
+    let dir = runtime_manifest_dir.filter(|d| d.parent().is_some()).unwrap_or_else(|| PathBuf::from(compile_time_manifest_dir));
+    dir.parent().map_or_else(|| dir.clone(), Path::to_path_buf)
 }
 
 pub fn cargo() -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.current_dir(root());
+    // Full Windows debuginfo plus one linker per CPU can exhaust RAM before any
+    // tests run. Scope these overridable defaults to CI, including parity/WASM
+    // subprocesses, without changing ordinary developer builds or GPU coverage.
+    if std::env::args().nth(1).as_deref() == Some("ci") {
+        static JOBS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+        let (build, threads) = JOBS.get_or_init(|| {
+            let ram_mb = available_ram_mb().or_else(|| total_ram_gb().map(|gb| gb.saturating_mul(1024) / 2));
+            let jobs = ci_jobs(ram_mb, std::thread::available_parallelism().map_or(4, |n| n.get()));
+            // More test threads barely shorten CI (a few heavy tests dominate) but make the
+            // wall-clock frame-budget tests flaky on a loaded machine.
+            (jobs.to_string(), jobs.min(4).to_string())
+        });
+        for (key, value) in [
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+            ("CARGO_BUILD_JOBS", build.as_str()),
+            ("RUST_TEST_THREADS", threads.as_str()),
+            ("NEXTEST_TEST_THREADS", threads.as_str()),
+        ] {
+            if std::env::var_os(key).is_none() {
+                c.env(key, value);
+            }
+        }
+    }
     c
 }
 
@@ -98,242 +179,30 @@ pub fn metadata() -> Result<serde_json::Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata: bad JSON: {e}"))
 }
 
-fn cmd_layers() -> Result<(), String> {
-    let crates = layers::from_metadata(&metadata()?)?;
-    println!("Dependency layering (plan/architecture.md §3)\n");
-    println!("{:<28} {:<14} workspace deps", "crate", "layer");
-    for c in &crates {
-        let ws: Vec<String> = c
-            .deps
-            .iter()
-            .filter(|d| d.workspace)
-            .map(|d| {
-                let k = match d.kind {
-                    layers::DepKind::Normal => "",
-                    layers::DepKind::Dev => " (dev)",
-                    layers::DepKind::Build => " (build)",
-                };
-                format!("{}{k}", layers::short_name(&d.name))
-            })
-            .collect();
-        println!("{:<28} {:<14} {}", c.name, layers::describe(layers::classify(&c.name)), ws.join(", "));
-    }
-    let violations = layers::check(&crates);
-    println!();
-    if violations.is_empty() {
-        println!("OK: {} crates, no layering violations.", crates.len());
-        Ok(())
-    } else {
-        println!("{} violation(s):", violations.len());
-        for v in &violations {
-            println!("  - {v}");
-        }
-        Err(format!("{} layering violation(s)", violations.len()))
-    }
-}
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
 
-/// Workspace packages that must build for wasm32: all L0–L5 crates plus
-/// the egui shell and the web app.
-fn wasm_set() -> Result<Vec<String>, String> {
-    let crates = layers::from_metadata(&metadata()?)?;
-    Ok(crates
-        .into_iter()
-        .filter(|c| match layers::classify(&c.name) {
-            Some(layers::Class::Layer(l)) => l <= 5,
-            Some(layers::Class::Standalone) => true,
-            _ => false,
-        })
-        .map(|c| c.name)
-        .chain(std::iter::once("lightcraft-web".to_string()))
-        .collect())
-}
-
-fn cmd_wasm() -> Result<(), String> {
-    let set = wasm_set()?;
-    let mut results = Vec::new();
-    for pkg in &set {
-        let mut c = cargo();
-        c.args(["check", "--target", "wasm32-unknown-unknown", "-p", pkg]);
-        let ok = run(c, &format!("cargo check --target wasm32-unknown-unknown -p {pkg}")).is_ok();
-        results.push((pkg.clone(), ok));
+    /// A runtime `CARGO_MANIFEST_DIR` without a parent (`/`, or an empty path) cannot name the
+    /// xtask crate: the parent lookup used to crash on it, and the workspace root falls back to
+    /// the compile-time value instead.
+    #[test]
+    fn a_runtime_manifest_dir_without_a_parent_is_not_the_workspace_root() {
+        let root = super::workspace_root(Some(PathBuf::from("/")), "/checkout/xtask");
+        assert_eq!(root, Path::new("/checkout"));
+        let root = super::workspace_root(Some(PathBuf::from("")), "/checkout/xtask");
+        assert_eq!(root, Path::new("/checkout"));
     }
-    println!("\nwasm32-unknown-unknown check:");
-    for (p, ok) in &results {
-        println!("  {:<6} {p}", if *ok { "ok" } else { "FAIL" });
-    }
-    let failed = results.iter().filter(|r| !r.1).count();
-    if failed == 0 { Ok(()) } else { Err(format!("{failed} crate(s) failed the wasm check")) }
-}
 
-fn cmd_ci() -> Result<(), String> {
-    type Step = (&'static str, Box<dyn Fn() -> Result<(), String>>);
-    let steps: Vec<Step> = vec![
-        (
-            "fmt",
-            Box::new(|| {
-                let mut c = cargo();
-                c.args(["fmt", "--all", "--", "--check"]);
-                run(c, "cargo fmt --all -- --check")
-            }),
-        ),
-        (
-            "clippy",
-            Box::new(|| {
-                let mut c = cargo();
-                c.args(["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]);
-                run(c, "cargo clippy --workspace --all-targets -- -D warnings")
-            }),
-        ),
-        (
-            "test",
-            Box::new(|| {
-                let mut c = cargo();
-                c.args(["test", "--workspace"]);
-                run(c, "cargo test --workspace")
-            }),
-        ),
-        ("parity", Box::new(|| parity::run(&root(), false))),
-        ("layers", Box::new(cmd_layers)),
-        ("assets", Box::new(|| assets::run(&root()))),
-        ("wasm", Box::new(cmd_wasm)),
-    ];
-    let mut done = Vec::new();
-    for (name, f) in &steps {
-        eprintln!("\n=== ci: {name} ===");
-        if let Err(e) = f() {
-            println!("\nCI summary:");
-            for d in &done {
-                println!("  ok    {d}");
-            }
-            println!("  FAIL  {name}: {e}");
-            for (n, _) in steps.iter().skip(done.len() + 1) {
-                println!("  skip  {n}");
-            }
-            return Err(format!("ci failed at `{name}`"));
-        }
-        done.push(*name);
+    #[test]
+    fn a_runtime_manifest_dir_names_its_own_workspace() {
+        let root = super::workspace_root(Some(PathBuf::from("/checkout/xtask")), "/elsewhere/xtask");
+        assert_eq!(root, Path::new("/checkout"));
     }
-    println!("\nCI summary: all {} steps passed ({})", done.len(), done.join(", "));
-    Ok(())
-}
 
-/// CC0 raw samples (raw.pixls.us). Small, representative set; extend freely (CC0 only).
-/// CC0 raw samples from raw.pixls.us (each verified CC0 on the site; files matched by their published SHA-256).
-/// One per format / compression variant we decode or deliberately report as unsupported (preview only).
-const RAW_SAMPLES: &[(&str, &str)] = &[
-    (
-        "arw-sony-a7m3-compressed.arw",
-        "https://raw.pixls.us/getfile.php/2414/nice/Sony%20-%20ILCE-7M3%20-%2014bit%2014bit%20compressed%20%283:2%29.ARW",
-    ),
-    (
-        "arw-sony-a7m3-uncompressed.arw",
-        "https://raw.pixls.us/getfile.php/2418/nice/Sony%20-%20ILCE-7M3%20-%2014bit%2014bit%20uncompressed%20%283:2%29.ARW",
-    ),
-    ("arw-sony-a7m4-14bit.arw", "https://raw.pixls.us/getfile.php/6936/nice/Sony%20-%20ILCE-7M4%20-%2014bit%20%283:2%29.ARW"),
-    // lossless compressed (Compression 7): L is 2×2 CFA cells per LJ92 sample; M and S are subsampled
-    ("arw-sony-a7m4-lossless-l.arw", "https://raw.pixls.us/data/Sony/ILCE-7M4/ILCE-7M4_DSC06674_FullFrame-LossLess-Compressed-Large.ARW"),
-    ("arw-sony-a7m4-lossless-m.arw", "https://raw.pixls.us/data/Sony/ILCE-7M4/ILCE-7M4_DSC06675_FullFrame-LossLess-Compressed-Medium.ARW"),
-    ("arw-sony-a7m4-lossless-s.arw", "https://raw.pixls.us/data/Sony/ILCE-7M4/ILCE-7M4_DSC06676_FullFrame-LossLess-Compressed-Small.ARW"),
-    // CR2 colour-filter layouts differ by model (issue #85): CR2CFAPattern 3 (GBRG) and 1 (RGGB) samples
-    ("cr2-canon-40d.cr2", "https://raw.pixls.us/data/Canon/EOS%2040D/_MG_0153.CR2"),
-    ("cr2-canon-550d.cr2", "https://raw.pixls.us/data/Canon/EOS%20550D/IMG_4047.CR2"),
-    ("cr2-canon-5d2.cr2", "https://raw.pixls.us/data/Canon/EOS%205D%20Mark%20II/08.canon.raw.cr2"),
-    ("cr2-canon-5dsr.cr2", "https://raw.pixls.us/data/Canon/EOS%205DS%20R/_DSR2002.CR2"),
-    ("cr2-canon-6d.cr2", "https://raw.pixls.us/data/Canon/EOS%206D/EOS_6D_RAW.CR2"),
-    ("cr2-canon-7d.cr2", "https://raw.pixls.us/data/Canon/EOS%207D/RAW_CANON_EOS_7D-raw.CR2"),
-    ("cr2-canon-5d3-sraw2.cr2", "https://raw.pixls.us/getfile.php/773/nice/Canon%20-%20EOS%205D%20Mark%20III%20-%20sRAW2%20%28sRAW%29.CR2"),
-    ("cr2-canon-5d3.cr2", "https://raw.pixls.us/getfile.php/771/nice/Canon%20-%20EOS%205D%20Mark%20III.CR2"),
-    ("cr2-canon-80d.cr2", "https://raw.pixls.us/getfile.php/1294/nice/Canon%20-%20EOS%2080D%20-%20RAW%20%283:2%29.CR2"),
-    ("cr3-canon-m50-craw.cr3", "https://raw.pixls.us/getfile.php/2663/nice/Canon%20-%20EOS%20M50%20-%20CRAW%20%283:2%29.CR3"),
-    (
-        "dng-adobe-canon-5d3-linear-lj92.dng",
-        "https://raw.pixls.us/getfile.php/1032/nice/Adobe%20DNG%20Converter%20-%20Canon%20EOS%205D%20Mark%20III%20-%20Lossless%20JPEG%20compression%2C%20rgb%20%283:2%29.DNG",
-    ),
-    (
-        "dng-adobe-canon-5d3-lj92.dng",
-        "https://raw.pixls.us/getfile.php/1024/nice/Adobe%20DNG%20Converter%20-%20Canon%20EOS%205D%20Mark%20III%20-%2016bit%2016bit%20Lossless%20JPEG%20compression%20%283:2%29.DNG",
-    ),
-    (
-        "dng-adobe-canon-5d3-lossy.dng",
-        "https://raw.pixls.us/getfile.php/1023/nice/Adobe%20DNG%20Converter%20-%20Canon%20EOS%205D%20Mark%20III%20-%20Lossy%20JPEG%20compression%20%283:2%29.DNG",
-    ),
-    (
-        "dng-canon-5d3-14bit-small.dng",
-        "https://raw.pixls.us/getfile.php/2204/nice/Canon%20-%20EOS%205D%20Mark%20III%20-%2014bit%2014bit%20%282.3471882640587%29.dng",
-    ),
-    ("dng-canon-5d3-16bit-169.dng", "https://raw.pixls.us/getfile.php/2649/nice/Canon%20-%20EOS%205D%20Mark%20III%20-%2016bit%20%2816:9%29.dng"),
-    ("dng-canon-5d3-16bit.dng", "https://raw.pixls.us/getfile.php/885/nice/Canon%20-%20EOS%205D%20Mark%20III%20-%2016bit%2016bit%20RAW.dng"),
-    ("dng-google-pixel2xl.dng", "https://raw.pixls.us/getfile.php/2206/nice/Google%20-%20Pixel%202%20XL%20-%2016bit%20%284:3%29.dng"),
-    ("dng-ricoh-gr3.dng", "https://raw.pixls.us/getfile.php/3115/nice/Ricoh%20-%20GR%20III%20-%2014bit%20%283:2%29.DNG"),
-    (
-        "nef-nikon-d5100-lossless.nef",
-        "https://raw.pixls.us/getfile.php/1597/nice/Nikon%20-%20D5100%20-%2014bit%2014bit%20compressed%20%28Lossless%29%20%283:2%29.nef",
-    ),
-    (
-        "nef-nikon-d5100-uncompressed.nef",
-        "https://raw.pixls.us/getfile.php/1598/nice/Nikon%20-%20D5100%20-%2014bit%2014bit%20uncompressed%20%283:2%29.nef",
-    ),
-    (
-        "nef-nikon-d7000-lossy12.nef",
-        "https://raw.pixls.us/getfile.php/961/nice/Nikon%20-%20D7000%20-%2012bit%2012bit%20compressed%20%28Lossy%20%28type%202%29%29%20%283:2%29.NEF",
-    ),
-    (
-        "nrw-nikon-b700-uncompressed.nrw",
-        "https://raw.pixls.us/getfile.php/1621/nice/Nikon%20-%20COOLPIX%20B700%20-%2012bit%2012bit%20uncompressed%20%284:3%29.NRW",
-    ),
-    ("orf-olympus-e1.orf", "https://raw.pixls.us/getfile.php/1800/nice/Olympus%20-%20E-1%20-%2016bit%20%284:3%29.ORF"),
-    ("orf-olympus-e400.orf", "https://raw.pixls.us/getfile.php/2151/nice/Olympus%20-%20E-400%20-%2016bit%20%284:3%29.ORF"),
-    ("orf-olympus-em1.orf", "https://raw.pixls.us/getfile.php/1051/nice/Olympus%20-%20E-M1%20-%2016bit%20%284:3%29.orf"),
-    ("orf-olympus-em10iii.orf", "https://raw.pixls.us/getfile.php/1787/nice/Olympus%20-%20E-M10%20Mark%20III%20-%2016bit%20%284:3%29.ORF"),
-    ("orf-olympus-xz2.orf", "https://raw.pixls.us/getfile.php/1432/nice/Olympus%20-%20XZ-2%20-%2012bit%20%284:3%29.orf"),
-    ("pef-pentax-k10d.pef", "https://raw.pixls.us/getfile.php/2239/nice/Pentax%20-%20K10D%20-%2012bit%2012bit%20compressed%20%283:2%29.PEF"),
-    ("pef-pentax-k3.pef", "https://raw.pixls.us/getfile.php/1075/nice/Pentax%20-%20K-3%20-%2014bit%20%283:2%29.PEF"),
-    ("pef-pentax-k5iis.pef", "https://raw.pixls.us/getfile.php/1198/nice/Pentax%20-%20K-5%20II%20s%20-%2014bit%20%283:2%29.PEF"),
-    (
-        "raf-fuji-xa2-12bit-bayer.raf",
-        "https://raw.pixls.us/getfile.php/2883/nice/Fujifilm%20-%20X-A2%20-%2012bit%2012bit%20uncompressed%20%283:2%29.RAF",
-    ),
-    (
-        "raf-fuji-xa5-14bit-bayer.raf",
-        "https://raw.pixls.us/getfile.php/2526/nice/Fujifilm%20-%20X-A5%20-%2014bit%2014bit%20uncompressed%20%283:2%29.RAF",
-    ),
-    ("raf-fuji-xe1-12bit.raf", "https://raw.pixls.us/getfile.php/3098/nice/Fujifilm%20-%20X-E1%20-%2012bit%2012bit%20uncompressed%20%283:2%29.RAF"),
-    ("raf-fuji-xt20-14bit.raf", "https://raw.pixls.us/getfile.php/1177/nice/Fujifilm%20-%20X-T20%20-%2014bit%2014bit%20uncompressed%20%283:2%29.RAF"),
-    (
-        "raf-fuji-xt20-compressed.raf",
-        "https://raw.pixls.us/getfile.php/1178/nice/Fujifilm%20-%20X-T20%20-%2014bit%2014bit%20compressed%20%283:2%29.RAF",
-    ),
-    ("rw2-panasonic-g9-b.rw2", "https://raw.pixls.us/getfile.php/2348/nice/Panasonic%20-%20DC-G9%20-%204:3.RW2"),
-    ("rw2-panasonic-g9.rw2", "https://raw.pixls.us/getfile.php/2585/nice/Panasonic%20-%20DC-G9%20-%204:3.RW2"),
-    ("rw2-panasonic-gh5.rw2", "https://raw.pixls.us/getfile.php/1517/nice/Panasonic%20-%20DC-GH5%20-%204:3.RW2"),
-    ("rw2-panasonic-gh5s.rw2", "https://raw.pixls.us/getfile.php/2603/nice/Panasonic%20-%20DC-GH5S%20-%204:3.RW2"),
-    ("rw2-panasonic-gx80.rw2", "https://raw.pixls.us/getfile.php/1569/nice/Panasonic%20-%20DMC-GX80%20-%204:3.RW2"),
-];
-
-fn cmd_corpus(download: bool) -> Result<(), String> {
-    let corpus = root().join("corpus");
-    println!(
-        "Test corpora live under {} (git-ignored, never committed).
-Tests that use a corpus skip cleanly when it is absent.
-
-  corpus/raw/        raw.pixls.us samples (CC0) — lightcraft-raw decodes every file.
-  corpus/images/     CC0 / public-domain JPEG/PNG/TIFF/HEIC samples (optional)
-",
-        corpus.display()
-    );
-    if !download {
-        return Ok(());
+    #[test]
+    fn without_a_runtime_value_the_compile_time_manifest_dir_decides() {
+        let root = super::workspace_root(None, "/checkout/xtask");
+        assert_eq!(root, Path::new("/checkout"));
     }
-    let dest = corpus.join("raw");
-    std::fs::create_dir_all(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-    for (name, url) in RAW_SAMPLES {
-        let out = dest.join(name);
-        if out.exists() {
-            continue;
-        }
-        let mut curl = Command::new("curl");
-        curl.args(["-fsSL", "-o"]).arg(&out).arg(url);
-        run(curl, &format!("curl {url}"))?;
-    }
-    Ok(())
 }

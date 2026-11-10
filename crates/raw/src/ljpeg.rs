@@ -5,6 +5,8 @@
 //!   restart intervals, `SSSS = 16` differences.
 //! - [`decode`] returns the frame as interleaved samples in raster order (`width × height × components`),
 //!   which callers re-tile (DNG tiles, CR2 slices).
+//! - Selection value 8, which T.81 leaves undefined, is Hasselblad's coding in 3FR and FFF files
+//!   ([`decode`] reads it; [`decode_hasselblad`] documents the rule and how it was established).
 //! - [`encode`] writes a conforming stream with per-component optimal Huffman tables built with the
 //!   T.81 Annex K.2 procedure — used by tests (bit-exact round trips) and later by DNG export.
 
@@ -81,7 +83,7 @@ impl Huffman {
     }
 
     #[inline]
-    pub fn decode(&self, br: &mut BitReader) -> Result<u8, RawError> {
+    pub fn decode<B: Bits>(&self, br: &mut B) -> Result<u8, RawError> {
         let peek = br.peek(LOOKUP);
         let (len, sym) = self.fast[peek as usize];
         if len > 0 {
@@ -100,6 +102,33 @@ impl Huffman {
         br.consume(len as u32);
         let idx = self.valptr[len] + code - self.mincode[len];
         self.values.get(idx as usize).copied().ok_or_else(|| err("invalid Huffman code"))
+    }
+}
+
+/// A source of entropy-coded bits, first bit most significant.
+pub trait Bits {
+    /// The next `n` (1..=32) bits without consuming them; zeros past the end.
+    fn peek(&mut self, n: u32) -> u32;
+    fn consume(&mut self, n: u32);
+    #[inline]
+    fn get(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let v = self.peek(n);
+        self.consume(n);
+        v
+    }
+}
+
+impl Bits for BitReader<'_> {
+    #[inline]
+    fn peek(&mut self, n: u32) -> u32 {
+        BitReader::peek(self, n)
+    }
+    #[inline]
+    fn consume(&mut self, n: u32) {
+        BitReader::consume(self, n)
     }
 }
 
@@ -190,7 +219,7 @@ impl<'a> BitReader<'a> {
 
 /// Difference value for category `ssss` (T.81 Table H.2 / F.12 EXTEND).
 #[inline]
-pub fn diff_value(br: &mut BitReader, ssss: u8) -> i32 {
+pub fn diff_value<B: Bits>(br: &mut B, ssss: u8) -> i32 {
     match ssss {
         0 => 0,
         16 => 32768,
@@ -207,6 +236,7 @@ struct Header {
     height: usize,
     width: usize,
     comps: Vec<u8>,
+    sampling: Vec<u8>,
     tables: [Option<Huffman>; 4],
     table_for: Vec<usize>,
     predictor: u8,
@@ -228,6 +258,7 @@ fn parse_header(d: &[u8]) -> Result<Header, RawError> {
         height: 0,
         width: 0,
         comps: vec![],
+        sampling: vec![],
         tables: [None, None, None, None],
         table_for: vec![],
         predictor: 1,
@@ -272,10 +303,11 @@ fn parse_header(d: &[u8]) -> Result<Header, RawError> {
                 }
                 for c in 0..n {
                     let (id, samp) = (seg[6 + 3 * c], seg[7 + 3 * c]);
-                    if samp != 0x11 {
-                        return Err(RawError::Unsupported("lossless JPEG with subsampled components".into()));
+                    if !(1..=4).contains(&(samp >> 4)) || !(1..=4).contains(&(samp & 15)) {
+                        return Err(err("invalid sampling factors"));
                     }
                     h.comps.push(id);
+                    h.sampling.push(samp);
                 }
                 if !(2..=16).contains(&h.precision) {
                     return Err(err("bad precision"));
@@ -322,8 +354,11 @@ fn parse_header(d: &[u8]) -> Result<Header, RawError> {
                 }
                 h.predictor = seg[1 + 2 * ns];
                 h.pt = seg[3 + 2 * ns] & 15;
-                if !(0..=7).contains(&h.predictor) {
-                    return Err(err("bad predictor"));
+                if h.predictor > 8 {
+                    return Err(RawError::Unsupported(format!(
+                        "lossless JPEG scan with predictor selection value {} (T.81 defines 0 to 7, Hasselblad uses 8)",
+                        h.predictor
+                    )));
                 }
                 if h.pt >= h.precision {
                     return Err(err("bad point transform"));
@@ -340,12 +375,280 @@ fn parse_header(d: &[u8]) -> Result<Header, RawError> {
 /// Parse only the frame header: (width, height, components, precision).
 pub fn frame_info(d: &[u8]) -> Result<(usize, usize, usize, u8), RawError> {
     let h = parse_header(d)?;
+    check_full_resolution(&h)?;
+    if h.predictor == 8 {
+        check_hasselblad(&h)?;
+    }
     Ok((h.width, h.height, h.comps.len(), h.precision))
+}
+
+fn check_full_resolution(h: &Header) -> Result<(), RawError> {
+    if h.sampling.iter().any(|&s| s != 0x11) {
+        return Err(RawError::Unsupported("lossless JPEG with subsampled components".into()));
+    }
+    Ok(())
+}
+
+/// The layout of every Hasselblad selection-value-8 scan measured; other layouts are not known to follow the rule.
+fn check_hasselblad(h: &Header) -> Result<(), RawError> {
+    if h.comps.len() != 1 || h.precision != 16 || h.pt != 0 || h.restart != 0 || h.width == 0 || !h.width.is_multiple_of(2) {
+        return Err(RawError::Unsupported(format!(
+            "lossless JPEG with selection value 8 and {} components, {} bits, point transform {}, restart interval {}, width {}",
+            h.comps.len(),
+            h.precision,
+            h.pt,
+            h.restart,
+            h.width
+        )));
+    }
+    Ok(())
+}
+
+/// Bits of Hasselblad's entropy data: 32-bit little-endian words, each read from its most significant bit, with
+/// no byte stuffing (every byte is data; `FF` bytes are not markers).
+struct WordBits<'a> {
+    data: &'a [u8],
+    pos: usize,
+    buf: u64,
+    bits: u32,
+    /// Zero bits fed past the last whole word (consumption reached them once `overrun > bits`).
+    overrun: u32,
+}
+
+impl<'a> WordBits<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0, buf: 0, bits: 0, overrun: 0 }
+    }
+
+    #[inline]
+    fn fill(&mut self) {
+        while self.bits <= 32 {
+            let word = match self.data.get(self.pos..self.pos + 4) {
+                Some(w) => {
+                    self.pos += 4;
+                    u32::from_le_bytes([w[0], w[1], w[2], w[3]])
+                }
+                None => {
+                    self.overrun = self.overrun.saturating_add(32);
+                    0
+                }
+            };
+            self.buf |= (word as u64) << (32 - self.bits);
+            self.bits += 32;
+        }
+    }
+}
+
+impl Bits for WordBits<'_> {
+    #[inline]
+    fn peek(&mut self, n: u32) -> u32 {
+        if self.bits < n {
+            self.fill();
+        }
+        (self.buf >> (64 - n)) as u32
+    }
+    #[inline]
+    fn consume(&mut self, n: u32) {
+        self.buf <<= n;
+        self.bits -= n;
+    }
+}
+
+/// Hasselblad's lossless JPEG with selection value 8 (3FR and FFF raws).
+///
+/// The rule was established by measurement on 14 sample files with the `ljpeg-explorer` tool, which tested it
+/// against alternative bit orders, stuffing, sample groupings, category-16 treatments and predictors:
+/// - the entropy data are 32-bit little-endian words, each read from its most significant bit, without byte
+///   stuffing;
+/// - each row is coded in pairs of samples: both Huffman categories (`SSSS`, T.81 table) come first, then both
+///   differences;
+/// - a difference has `SSSS` extra bits, extended as in T.81 Table H.2; after `SSSS = 16` come sixteen bits that
+///   take no part, and the difference is -32768 (equal to T.81's +32768 modulo 2^16);
+/// - a sample is the previous sample of the same column parity in its row plus the difference, modulo 2^16; before
+///   the first pair of every row both are 32768 (half the 16-bit range).
+///
+/// Provenance: the first hypothesis for this rule was recalled by the AI model that wrote this code from its training
+/// data, which includes other raw converters; it was treated as one candidate, corrected where the files disagreed
+/// (the byte order of the words) and confirmed by an exhaustive black-box search over 17,280 layout hypotheses on the
+/// CC0 sample files. No other converter's source was consulted, and the code is original.
+pub fn decode_hasselblad(d: &[u8], max_samples: usize) -> Result<Frame, RawError> {
+    let h = parse_header(d)?;
+    if h.predictor != 8 {
+        return Err(err("not a selection value 8 scan"));
+    }
+    hasselblad_frame(d, &h, max_samples)
+}
+
+fn hasselblad_frame(d: &[u8], h: &Header, max_samples: usize) -> Result<Frame, RawError> {
+    check_hasselblad(h)?;
+    let (w, ht) = (h.width, h.height);
+    let total = w.checked_mul(ht).ok_or_else(|| err("frame too large"))?;
+    if total > max_samples {
+        return Err(RawError::Limit("lossless JPEG frame larger than expected"));
+    }
+    let entropy = &d[h.scan_start..];
+    if (entropy.len() as u64 + 64) * 8 < total as u64 {
+        return Err(err("entropy data too short for frame"));
+    }
+    let table =
+        h.table_for.first().and_then(|&t| h.tables.get(t)).and_then(Option::as_ref).ok_or_else(|| err("scan uses an undefined Huffman table"))?;
+    let mut out = vec![0u16; total];
+    let mut br = WordBits::new(entropy);
+    let start = 1u32 << (h.precision - 1);
+    for row in out.chunks_exact_mut(w) {
+        let mut last = [start, start];
+        // the width is even (checked), so every sample is in a pair
+        for pair in row.as_chunks_mut::<2>().0 {
+            let ssss = [table.decode(&mut br)?, table.decode(&mut br)?];
+            for (k, s) in ssss.into_iter().enumerate() {
+                let diff = match s {
+                    0..=15 => diff_value(&mut br, s),
+                    16 => {
+                        br.get(16);
+                        -32768
+                    }
+                    _ => return Err(err("invalid difference category")),
+                };
+                let v = (last[k] as i32 + diff) as u32 & 0xffff;
+                last[k] = v;
+                pair[k] = v as u16;
+            }
+        }
+        // bits consumed beyond the last whole word
+        if br.overrun > br.bits {
+            return Err(err("entropy data exhausted"));
+        }
+    }
+    Ok(Frame { width: w, height: ht, components: 1, precision: h.precision, predictor: 8, point_transform: 0, data: out })
+}
+
+fn check_subsampled(h: &Header) -> Result<usize, RawError> {
+    let vertical = match h.sampling.as_slice() {
+        [0x22, 0x11, 0x11] => 2,
+        [0x21, 0x11, 0x11] => 1,
+        _ => return Err(RawError::Unsupported("lossless JPEG subsampling layout".into())),
+    };
+    if h.predictor != 1 || h.restart != 0 {
+        return Err(RawError::Unsupported("lossless JPEG subsampled predictor / restarts".into()));
+    }
+    if h.width == 0 || h.height == 0 || !h.width.is_multiple_of(2) || !h.height.is_multiple_of(vertical) {
+        return Err(err("subsampled frame dimensions do not match MCU size"));
+    }
+    Ok(vertical)
+}
+
+/// Sony M/S tiles and Canon sRAW / mRAW: horizontal prediction, no restart markers. Keep subsampled planes
+/// separate; expanding them into a mosaic would silently corrupt the existing CFA callers.
+/// Returns (width, height, vertical subsampling of the chroma planes).
+pub(crate) fn frame_info_subsampled(d: &[u8]) -> Result<(usize, usize, usize), RawError> {
+    let h = parse_header(d)?;
+    let vertical = check_subsampled(&h)?;
+    Ok((h.width, h.height, vertical))
+}
+
+/// How the first-column prediction and the running predictor of a subsampled frame are chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Prediction {
+    /// Sony: the left neighbour in the plane; at the first column the sample above, except that a top luma
+    /// row of an MCU row reads the previous MCU row's top luma sample.
+    Geometric,
+    /// Canon: every component is its own one-dimensional chain in decoding order (the previous sample of the
+    /// same component, so the second luma row of a 4:2:0 MCU continues from the end of the first); the first
+    /// sample of each MCU row starts from the first sample of the previous MCU row.
+    Sequential,
+}
+
+pub(crate) struct FrameSubsampled {
+    pub width: usize,
+    pub height: usize,
+    pub vertical_subsampling: usize,
+    /// Y at full resolution; Cb and Cr at half width, with 1× or 2× vertical subsampling.
+    pub planes: [Vec<u16>; 3],
+}
+
+/// The 4:2:0 / 4:2:2 LJ92 variants of Sony (M/S ARW) and Canon (sRAW / mRAW): T.81 MCU ordering and differences,
+/// modulo 2^16. [`Prediction`] selects the predictor each maker uses.
+///
+/// Sony: at the first column, the top luma row predicts from the previous MCU row's top
+/// sample (two image rows above), and the bottom row from the current top sample.
+/// Observed black-box: using the immediately preceding image row introduces tile seams.
+pub(crate) fn decode_subsampled(d: &[u8], max_samples: usize, prediction: Prediction) -> Result<FrameSubsampled, RawError> {
+    let h = parse_header(d)?;
+    let vertical = check_subsampled(&h)?;
+    let pixels = h.width.checked_mul(h.height).ok_or_else(|| err("frame too large"))?;
+    let chroma = pixels / (2 * vertical);
+    let total = pixels.checked_add(chroma.checked_mul(2).ok_or_else(|| err("frame too large"))?).ok_or_else(|| err("frame too large"))?;
+    if total > max_samples {
+        return Err(RawError::Limit("lossless JPEG frame larger than expected"));
+    }
+    let entropy = &d[h.scan_start..];
+    if (entropy.len() as u64 + 64) * 8 < total as u64 {
+        return Err(err("entropy data too short for frame"));
+    }
+    let tables: Vec<&Huffman> = h
+        .table_for
+        .iter()
+        .map(|&t| h.tables.get(t).and_then(Option::as_ref).ok_or_else(|| err("missing Huffman table")))
+        .collect::<Result<_, _>>()?;
+    let mut planes = [vec![0u16; pixels], vec![0u16; chroma], vec![0u16; chroma]];
+    let mut br = BitReader::new(entropy);
+    let init = 1i32 << (h.precision - h.pt - 1);
+    // Sequential prediction: the last sample of each component, and the first sample of its previous MCU row
+    let mut last = [init; 3];
+    let mut row_first = [init; 3];
+    for my in 0..h.height / vertical {
+        for mx in 0..h.width / 2 {
+            for (c, plane) in planes.iter_mut().enumerate() {
+                let horizontal_factor = if c == 0 { 2 } else { 1 };
+                let vertical_factor = if c == 0 { vertical } else { 1 };
+                let width = h.width * horizontal_factor / 2;
+                for dy in 0..vertical_factor {
+                    for dx in 0..horizontal_factor {
+                        let (x, y) = (mx * horizontal_factor + dx, my * vertical_factor + dy);
+                        let i = y * width + x;
+                        let pred = match prediction {
+                            Prediction::Geometric if x > 0 => plane[i - 1] as i32,
+                            Prediction::Geometric if c == 0 && dy == 0 && y >= vertical => plane[i - vertical * width] as i32,
+                            Prediction::Geometric if y > 0 => plane[i - width] as i32,
+                            Prediction::Geometric => init,
+                            Prediction::Sequential if mx == 0 && dx == 0 && dy == 0 => row_first[c],
+                            Prediction::Sequential => last[c],
+                        };
+                        let ssss = tables[c].decode(&mut br)?;
+                        if ssss > 16 {
+                            return Err(err("invalid difference category"));
+                        }
+                        let value = ((pred + diff_value(&mut br, ssss)) & 0xffff) as u16;
+                        plane[i] = value;
+                        last[c] = i32::from(value);
+                        if mx == 0 && dx == 0 && dy == 0 {
+                            row_first[c] = i32::from(value);
+                        }
+                    }
+                }
+            }
+        }
+        if br.overrun > br.bits {
+            return Err(err("entropy data exhausted"));
+        }
+    }
+    if h.pt > 0 {
+        for plane in &mut planes {
+            for v in plane {
+                *v <<= h.pt;
+            }
+        }
+    }
+    Ok(FrameSubsampled { width: h.width, height: h.height, vertical_subsampling: vertical, planes })
 }
 
 /// Decode a lossless JPEG stream. `max_samples` bounds the allocation (hostile headers).
 pub fn decode(d: &[u8], max_samples: usize) -> Result<Frame, RawError> {
     let h = parse_header(d)?;
+    check_full_resolution(&h)?;
+    if h.predictor == 8 {
+        return hasselblad_frame(d, &h, max_samples);
+    }
     let (w, ht, nc) = (h.width, h.height, h.comps.len());
     if w == 0 || ht == 0 {
         return Err(err("zero frame size"));
@@ -701,90 +1004,4 @@ pub fn encode(data: &[u16], width: usize, height: usize, components: usize, prec
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn noise(n: usize, bits: u32, seed: u64) -> Vec<u16> {
-        let mut s = seed;
-        (0..n)
-            .map(|i| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                let smooth = ((i % 97) as u32 * 37) % (1 << bits);
-                let jitter = ((s >> 33) as u32) % 64;
-                ((smooth + jitter) % (1 << bits)) as u16
-            })
-            .collect()
-    }
-
-    #[test]
-    fn roundtrip_all_predictors_components_precisions() {
-        for pred in 1..=7u8 {
-            for comps in 1..=4usize {
-                for bits in [8u8, 12, 14, 16] {
-                    let (w, h) = (13, 7);
-                    let data = noise(w * h * comps, bits as u32, (pred as u64) * 31 + comps as u64);
-                    let enc = encode(&data, w, h, comps, bits, pred, 0);
-                    let f = decode(&enc, usize::MAX).unwrap();
-                    assert_eq!((f.width, f.height, f.components, f.precision, f.predictor), (w, h, comps, bits, pred));
-                    assert_eq!(f.data, data, "pred {pred} comps {comps} bits {bits}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn roundtrip_extremes_and_restarts() {
-        // alternating 0 / 65535 forces SSSS = 16 differences
-        let data: Vec<u16> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 65535 }).collect();
-        for pred in 1..=7 {
-            let enc = encode(&data, 8, 8, 1, 16, pred, 0);
-            assert_eq!(decode(&enc, usize::MAX).unwrap().data, data);
-        }
-        let data = noise(20 * 9 * 2, 12, 5);
-        for rst in [1usize, 7, 20, 40] {
-            let enc = encode(&data, 20, 9, 2, 12, 6, rst);
-            assert_eq!(decode(&enc, usize::MAX).unwrap().data, data, "restart {rst}");
-        }
-    }
-
-    #[test]
-    fn constant_image_single_symbol_table() {
-        let data = vec![1234u16; 16 * 4];
-        let enc = encode(&data, 16, 4, 1, 14, 1, 0);
-        assert_eq!(decode(&enc, usize::MAX).unwrap().data, data);
-    }
-
-    #[test]
-    fn rejects_bad_streams() {
-        assert!(decode(&[], 100).is_err());
-        assert!(decode(&[0xff, 0xd8, 0xff, 0xd9], 100).is_err());
-        let data = noise(64, 12, 1);
-        let enc = encode(&data, 8, 8, 1, 12, 1, 0);
-        assert!(matches!(decode(&enc, 10), Err(RawError::Limit(_))));
-        for n in 0..enc.len() {
-            let _ = decode(&enc[..n], usize::MAX);
-        }
-        let mut bad = enc.clone();
-        for i in (20..bad.len()).step_by(3) {
-            bad[i] ^= 0x5a;
-        }
-        let _ = decode(&bad, usize::MAX);
-    }
-
-    #[test]
-    fn code_lengths_are_limited_to_16() {
-        // Fibonacci-like frequencies produce very long codes before adjustment
-        let mut f = [0u32; 17];
-        let (mut a, mut b) = (1u32, 1u32);
-        for x in f.iter_mut() {
-            *x = a;
-            let c = a.saturating_add(b);
-            a = b;
-            b = c;
-        }
-        let (counts, values) = code_lengths(&f);
-        assert_eq!(counts.iter().map(|&c| c as usize).sum::<usize>(), 17);
-        assert_eq!(values.len(), 17);
-        assert!(Huffman::new(&counts, &values).is_ok());
-    }
-}
+pub(crate) mod tests;

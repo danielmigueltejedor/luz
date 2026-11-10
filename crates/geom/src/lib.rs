@@ -6,10 +6,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod crop;
+mod crop_drag;
 mod homography;
+mod real;
 
 pub use crop::{CropGeometry, crop_fit_angle, max_inscribed_scale};
+pub use crop_drag::{CropHandle, MAX_RATIO, MIN_CROP_FRACTION, drag_crop};
 pub use homography::Homography;
+pub use real::{Interval, Real};
 
 use serde::{Deserialize, Serialize};
 
@@ -174,7 +178,7 @@ impl Rect {
     }
     /// Largest rectangle of aspect `a` (w/h) centred in `self`.
     pub fn fit_aspect(&self, a: f64) -> Rect {
-        if a <= 0.0 || self.is_empty() {
+        if !(a.is_finite() && a > 0.0) || self.is_empty() {
             return *self;
         }
         let (w, h) = (self.width(), self.height());
@@ -213,8 +217,13 @@ impl Affine {
         Affine::translate(p.to_vec()) * Affine::rotate(a) * Affine::translate(-p.to_vec())
     }
     pub fn apply(&self, p: Point) -> Point {
+        let (x, y) = self.apply_real(p.x, p.y);
+        Point::new(x, y)
+    }
+    /// [`Affine::apply`] for any [`Real`] (e.g. [`Interval`] bounds over many points).
+    pub fn apply_real<T: Real>(&self, x: T, y: T) -> (T, T) {
         let [a, b, c, d, e, f] = self.0;
-        Point::new(a * p.x + c * p.y + e, b * p.x + d * p.y + f)
+        (x * a + y * c + e, x * b + y * d + f)
     }
     pub fn apply_vec(&self, v: Vec2) -> Vec2 {
         let [a, b, c, d, ..] = self.0;
@@ -225,12 +234,13 @@ impl Affine {
     }
     pub fn inverse(&self) -> Option<Affine> {
         let det = self.determinant();
-        if det.abs() < 1e-300 {
+        if !det.is_finite() || det.abs() < 1e-300 {
             return None;
         }
         let [a, b, c, d, e, f] = self.0;
         let inv = 1.0 / det;
-        Some(Affine([d * inv, -b * inv, -c * inv, a * inv, (c * f - d * e) * inv, (b * e - a * f) * inv]))
+        let coefficients = [d * inv, -b * inv, -c * inv, a * inv, (c * f - d * e) * inv, (b * e - a * f) * inv];
+        coefficients.iter().all(|v| v.is_finite()).then_some(Affine(coefficients))
     }
     /// Bounding box of a transformed rectangle.
     pub fn transform_rect_bbox(&self, r: &Rect) -> Rect {
@@ -332,6 +342,23 @@ impl Orientation {
         // flipH ∘ rot(t) = rot(-t) ∘ flipH
         Orientation::from_parts(!f, (4 - t) % 4)
     }
+    /// The orientation that undoes this one (`o.inverse().map(o.map(p)) == p`). Flips and half turns
+    /// are their own inverses; quarter turns swap.
+    pub fn inverse(self) -> Orientation {
+        match self {
+            Orientation::Rotate90 => Orientation::Rotate270,
+            Orientation::Rotate270 => Orientation::Rotate90,
+            o => o,
+        }
+    }
+    /// Map a rectangle in normalized (0..1) coordinates of the stored image to normalized coordinates
+    /// of the oriented one (e.g. a face region given on the upright photo → the frame after the user's
+    /// Rotate Left/Right).
+    pub fn map_norm_rect(self, r: Rect) -> Rect {
+        let (ax, ay) = self.map(r.x0, r.y0, 1.0, 1.0);
+        let (bx, by) = self.map(r.x1, r.y1, 1.0, 1.0);
+        Rect::from_points(Point::new(ax, ay), Point::new(bx, by))
+    }
     /// Map a point in stored pixel space (w×h stored dims) to oriented space.
     pub fn map(self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
         let (flip, t) = self.to_parts();
@@ -415,6 +442,19 @@ mod tests {
         assert_eq!(Orientation::Normal.rotated(false), Orientation::Rotate270);
         assert_eq!(Orientation::Normal.flipped_h(), Orientation::FlipH);
         assert_eq!(Orientation::Rotate90.flipped_h().flipped_h(), Orientation::Rotate90);
+    }
+
+    #[test]
+    fn orientation_inverse_and_norm_rect() {
+        let r = Rect::new(0.1, 0.2, 0.3, 0.6);
+        for v in 1..=8 {
+            let o = Orientation::from_exif(v);
+            let back = o.inverse().map_norm_rect(o.map_norm_rect(r));
+            assert!([back.x0 - r.x0, back.y0 - r.y0, back.x1 - r.x1, back.y1 - r.y1].iter().all(|d| d.abs() < 1e-12), "{o:?}: {back:?}");
+        }
+        // a quarter turn clockwise: the left of the upright photo becomes its top
+        let q = Orientation::Rotate90.map_norm_rect(r);
+        assert!([q.x0 - 0.4, q.y0 - 0.1, q.x1 - 0.8, q.y1 - 0.3].iter().all(|d| d.abs() < 1e-12), "{q:?}");
     }
 
     proptest::proptest! {

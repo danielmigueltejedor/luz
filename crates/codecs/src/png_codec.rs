@@ -7,6 +7,10 @@ use lightcraft_color::{Mat3, RgbSpace, Xy};
 
 const F: Format = Format::Png;
 
+/// Expansion cap for a compressed text chunk's payload: real XMP documents are a few hundred
+/// kilobytes, so anything past this is hostile input, not metadata.
+const MAX_TEXT_CHUNK: usize = 4 << 20;
+
 fn err(e: impl std::fmt::Display) -> Error {
     Error::Malformed(F, e.to_string())
 }
@@ -42,11 +46,18 @@ pub(crate) fn decode(bytes: &[u8], opts: &DecodeOptions) -> Result<Decoded> {
     };
     let raw = Raw { width: out.width as usize, height: out.height as usize, model, alpha, premultiplied: false, buf: samples, bit_depth: depth };
 
+    // png's `get_text()` inflates a compressed chunk with no bound of its own: a tiny
+    // iTXt can claim an XMP document of arbitrary size. Expand through the bounded path
+    // instead, and drop any XMP bigger than the cap.
     let xmp = info
         .utf8_text
         .iter()
         .find(|t| t.keyword == "XML:com.adobe.xmp")
-        .and_then(|t| t.get_text().ok())
+        .and_then(|t| {
+            let mut t = t.clone();
+            t.decompress_text_with_limit(MAX_TEXT_CHUNK).ok()?;
+            t.get_text().ok()
+        })
         .or_else(|| info.uncompressed_latin1_text.iter().find(|t| t.keyword == "XML:com.adobe.xmp").map(|t| t.text.clone()));
     let exif = info.exif_metadata.as_ref().map(|e| {
         let e = e.to_vec();
@@ -57,26 +68,80 @@ pub(crate) fn decode(bytes: &[u8], opts: &DecodeOptions) -> Result<Decoded> {
     finish(F, raw, meta, (w, h), opts)
 }
 
-fn container_hint(info: &png::Info) -> Option<SourceSpace> {
-    if let Some(c) = &info.coding_independent_code_points {
-        let named = match c.color_primaries {
-            1 => Some(NamedSpace::Srgb),
-            9 => Some(NamedSpace::Rec2020),
-            12 => Some(NamedSpace::DisplayP3),
-            _ => None,
-        };
-        let trc = match c.transfer_function {
-            13 => Some(Trc::Srgb),
-            1 | 6 | 14 | 15 => Some(Trc::Rec709),
-            8 => Some(Trc::Linear),
-            4 => Some(Trc::Gamma(2.2)),
-            _ => None,
-        };
-        if let (Some(n), Some(t)) = (named, trc) {
-            let mut s = SourceSpace::named(n, SpaceOrigin::Container);
-            s.trc = Some([t.clone(), t.clone(), t]);
-            return Some(s);
+/// Stored dimensions and EXIF orientation (`eXIf`, wherever it is) from the chunk headers, without
+/// inflating the image data. Refused, as a decode would refuse it: an invalid IHDR, an indexed
+/// image without a palette, no IDAT, or a file that ends before the chunk after the last IDAT
+/// begins (truncated image data). Chunk CRCs and the deflate stream are not checked.
+pub(crate) fn header(b: &[u8]) -> Result<(u32, u32, u16)> {
+    if !b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(err("bad signature"));
+    }
+    let be32 = |p: usize| b.get(p..p.checked_add(4)?).map(|v| u32::from_be_bytes([v[0], v[1], v[2], v[3]]));
+    if be32(8) != Some(13) || b.get(12..16) != Some(b"IHDR") {
+        return Err(err("missing IHDR"));
+    }
+    let ihdr = b.get(16..29).ok_or_else(|| err("truncated IHDR"))?;
+    let (w, h) = (u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]), u32::from_be_bytes([ihdr[4], ihdr[5], ihdr[6], ihdr[7]]));
+    let (depth, color, compression, filter, interlace) = (ihdr[8], ihdr[9], ihdr[10], ihdr[11], ihdr[12]);
+    if w > i32::MAX as u32 || h > i32::MAX as u32 {
+        return Err(err("dimensions out of range"));
+    }
+    check_size(F, w as u64, h as u64, &DecodeOptions::default())?;
+    let depth_ok = match color {
+        0 => matches!(depth, 1 | 2 | 4 | 8 | 16),
+        3 => matches!(depth, 1 | 2 | 4 | 8),
+        2 | 4 | 6 => matches!(depth, 8 | 16),
+        _ => false,
+    };
+    if !depth_ok || compression != 0 || filter != 0 || interlace > 1 {
+        return Err(err("invalid IHDR"));
+    }
+    let (mut p, mut palette, mut idat, mut after_idat, mut exif) = (8usize, false, false, false, None);
+    while let Some(len) = be32(p) {
+        let Some(kind) = p.checked_add(4).and_then(|k| b.get(k..k.checked_add(4)?)) else { break };
+        if idat && kind != b"IDAT" {
+            // a chunk follows the image data: the IDAT run is complete
+            after_idat = true;
         }
+        if kind == b"IEND" {
+            break;
+        }
+        let start = p.saturating_add(8);
+        let data = (len <= i32::MAX as u32).then(|| start.checked_add(len as usize).and_then(|end| b.get(start..end))).flatten();
+        let Some(data) = data else {
+            if after_idat {
+                break; // a damaged chunk after the image data: a decode ignores it too
+            }
+            return Err(err("truncated"));
+        };
+        match kind {
+            b"PLTE" => palette = true,
+            b"IDAT" if after_idat => {} // a stray IDAT after other chunks: the first run is the image
+            b"IDAT" => {
+                if color == 3 && !palette {
+                    return Err(err("indexed image without a palette"));
+                }
+                idat = true;
+            }
+            b"eXIf" if exif.is_none() => exif = Some(data.strip_prefix(b"Exif\0\0").unwrap_or(data)),
+            _ => {}
+        }
+        p = start.saturating_add(data.len()).saturating_add(4);
+    }
+    if !idat {
+        return Err(err("no image data"));
+    }
+    if !after_idat {
+        return Err(err("truncated image data"));
+    }
+    Ok((w, h, exif.map(crate::exif::summarize).unwrap_or_default().orientation.unwrap_or(1)))
+}
+
+fn container_hint(info: &png::Info) -> Option<SourceSpace> {
+    if let Some(s) =
+        info.coding_independent_code_points.as_ref().and_then(|c| SourceSpace::from_cicp(c.color_primaries.into(), c.transfer_function.into()))
+    {
+        return Some(s);
     }
     if info.srgb.is_some() {
         return Some(SourceSpace::named(NamedSpace::Srgb, SpaceOrigin::Container));
@@ -113,4 +178,56 @@ fn rgb_to_xyz_d50_checked(space: &RgbSpace) -> Option<Mat3> {
         return None;
     }
     Some(crate::space::rgb_to_xyz_d50(space))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::DecodeOptions;
+
+    /// A compressed text chunk is expanded by `png` through our own cap: an XMP document
+    /// bigger than it is dropped, not inflated. Compressing an 8 MiB string is a few
+    /// kilobytes — the reverse of what the unbounded `get_text()` path allowed.
+    #[test]
+    fn compressed_xmp_over_the_cap_is_dropped() {
+        let out = png_with_compressed_xmp(&"x".repeat(8 << 20));
+        let d = crate::decode(&out, DecodeOptions::default()).unwrap();
+        assert!(d.xmp.is_none());
+        assert_eq!((d.width, d.height), (1, 1));
+    }
+
+    /// XMP within the cap is still read, compressed or not.
+    #[test]
+    fn compressed_xmp_under_the_cap_is_read() {
+        let out = png_with_compressed_xmp(&"<?xpacket?><xmp/>".repeat(100));
+        let d = crate::decode(&out, DecodeOptions::default()).unwrap();
+        assert!(d.xmp.as_deref().is_some_and(|x| x.contains("xmp/")));
+    }
+
+    /// A little-endian PNG with one compressed iTXt chunk carrying `payload` as XMP.
+    fn png_with_compressed_xmp(payload: &str) -> Vec<u8> {
+        use png::text_metadata::{EncodableTextChunk, ITXtChunk};
+        let mut base = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut base, 1, 1);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[0x7F]).unwrap();
+            w.finish().unwrap();
+        }
+        // `ITXtChunk::encode` writes the complete chunk (length, type, payload, CRC), with
+        // the text compressed.
+        let mut chunk = Vec::new();
+        let mut xmp = ITXtChunk::new("XML:com.adobe.xmp", payload);
+        xmp.compressed = true;
+        xmp.compress_text().unwrap();
+        xmp.encode(&mut chunk).unwrap();
+        // Text chunks after IDAT land in `info` once the stream is finished: insert ours
+        // before the trailing IEND (a zero-length chunk is exactly 12 bytes).
+        let split = base.len() - 12;
+        let mut out = base[..split].to_vec();
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&base[split..]);
+        out
+    }
 }
