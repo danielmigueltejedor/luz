@@ -11,13 +11,15 @@
 //! dimensionless scales), so a 400 px preview and a full-size export are warped identically.
 //!
 //! Also here: automatic lateral chromatic aberration estimation ([`estimate_lateral_ca`]) and [`defringe`].
-//! Profile corrections use only lens data embedded in DNG files (`WarpRectilinear` / `FixVignetteRadial`).
+//! Profile corrections use lens data embedded in the files (DNG `WarpRectilinear` / `WarpRectilinear2` /
+//! `FixVignetteRadial`, and the raw readers' equivalent of a camera's own correction, e.g. Panasonic / Leica RW2
+//! distortion), or a lens database profile in the same form (`lightcraft_lensdb`).
 
 use std::sync::Mutex;
 
 use lightcraft_color::perceptual::{oklab_from_2020, oklab_to_2020};
-use lightcraft_develop::{DevelopSettings, EmbeddedLens, EmbeddedVignette, EmbeddedWarp};
-use lightcraft_geom::{Homography, Orientation, Point};
+use lightcraft_develop::{DevelopSettings, EmbeddedLens, EmbeddedVignette, EmbeddedWarp, EmbeddedWarpStage};
+use lightcraft_geom::{Affine, Homography, Interval, Orientation, Point, Real};
 use lightcraft_raster::{Plane, Rgb32f};
 
 use crate::for_rows;
@@ -102,7 +104,13 @@ impl Warp {
         self.persp != Homography::IDENTITY
             || self.k1 != 0.0
             || self.ca.iter().any(|c| *c != 0.0)
-            || (self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.warp.is_some()))
+            || (self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.warp.is_some() || l.has_stages()))
+    }
+
+    /// Whether the embedded lens warp is a `WarpRectilinear2` chain, whose degree-14 polynomials are ill-conditioned
+    /// in `f32` (terms of 1e5 cancelling to 1): a renderer that works in `f32` must sample on the CPU.
+    pub fn needs_f64(&self) -> bool {
+        self.lens_dist != 0.0 && self.lens.is_some_and(|l| l.has_stages())
     }
 
     /// Whether the colour planes are sampled at different positions.
@@ -110,6 +118,8 @@ impl Warp {
         self.ca[0] != self.ca[1]
             || self.ca[1] != self.ca[2]
             || (self.lens_dist != 0.0 && self.lens.and_then(|l| l.warp).is_some_and(|w| w.planes[0] != w.planes[1] || w.planes[1] != w.planes[2]))
+            || (self.lens_dist != 0.0
+                && self.lens.is_some_and(|l| l.stages.iter().flatten().any(|s| s.planes[0] != s.planes[1] || s.planes[1] != s.planes[2])))
     }
 
     pub fn has_gain(&self) -> bool {
@@ -122,12 +132,18 @@ impl Warp {
 
     /// Transformed px → lens-corrected px (inverse perspective).
     pub fn to_corrected(&self, p: Point) -> Point {
+        let (x, y) = self.to_corrected_real(p.x, p.y);
+        Point::new(x, y)
+    }
+
+    /// [`Warp::to_corrected`] for any [`Real`].
+    fn to_corrected_real<T: Real>(&self, x: T, y: T) -> (T, T) {
         if self.persp == Homography::IDENTITY {
-            return p;
+            return (x, y);
         }
         let (c, l) = (self.centre(), self.half_long());
-        let q = self.persp_inv.apply(Point::new((p.x - c.x) / l, (p.y - c.y) / l));
-        Point::new(c.x + q.x * l, c.y + q.y * l)
+        let (qx, qy) = self.persp_inv.apply_real((x - c.x) / l, (y - c.y) / l);
+        (qx * l + c.x, qy * l + c.y)
     }
 
     /// Lens-corrected px → transformed px (forward perspective).
@@ -142,31 +158,80 @@ impl Warp {
 
     /// Lens-corrected px → source px for colour plane `ch` (0 = R, 1 = G, 2 = B).
     pub fn corrected_to_source(&self, p: Point, ch: usize) -> Point {
+        let (x, y) = self.corrected_to_source_real(p.x, p.y, ch);
+        Point::new(x, y)
+    }
+
+    /// [`Warp::corrected_to_source`] for any [`Real`].
+    fn corrected_to_source_real<T: Real>(&self, x: T, y: T, ch: usize) -> (T, T) {
         let c = self.centre();
         let hd = (self.w.hypot(self.h) / 2.0).max(1e-9);
-        let mut q = p;
+        let (mut qx, mut qy) = (x, y);
         if self.k1 != 0.0 {
-            let (dx, dy) = (q.x - c.x, q.y - c.y);
+            let (dx, dy) = (qx - c.x, qy - c.y);
             let r2 = (dx * dx + dy * dy) / (hd * hd);
-            let f = 1.0 + self.k1 * r2;
-            q = Point::new(c.x + dx * f, c.y + dy * f);
+            let f = r2 * self.k1 + 1.0;
+            (qx, qy) = (dx * f + c.x, dy * f + c.y);
         }
         if self.lens_dist != 0.0
             && let Some(wp) = self.lens.and_then(|l| l.warp)
         {
-            let s = embedded_warp(&wp, q, ch, self.w, self.h);
-            q = Point::new(q.x + (s.x - q.x) * self.lens_dist, q.y + (s.y - q.y) * self.lens_dist);
+            let (sx, sy) = embedded_warp_real(&wp, qx, qy, ch, self.w, self.h);
+            (qx, qy) = (qx + (sx - qx) * self.lens_dist, qy + (sy - qy) * self.lens_dist);
+        }
+        if self.lens_dist != 0.0
+            && let Some(l) = self.lens.filter(|l| l.has_stages())
+        {
+            // each opcode warps the image the one before it made, so the last one maps the output position first
+            let (mut sx, mut sy) = (qx, qy);
+            for st in l.stages.iter().rev().flatten() {
+                (sx, sy) = embedded_stage_real(st, sx, sy, ch, self.w, self.h);
+            }
+            (qx, qy) = (qx + (sx - qx) * self.lens_dist, qy + (sy - qy) * self.lens_dist);
         }
         let k = self.ca[ch];
         if k != 0.0 {
-            q = Point::new(c.x + (q.x - c.x) * (1.0 + k), c.y + (q.y - c.y) * (1.0 + k));
+            (qx, qy) = ((qx - c.x) * (1.0 + k) + c.x, (qy - c.y) * (1.0 + k) + c.y);
         }
-        q
+        (qx, qy)
     }
 
     /// Transformed px → source px for plane `ch`.
     pub fn to_source(&self, p: Point, ch: usize) -> Point {
         self.corrected_to_source(self.to_corrected(p), ch)
+    }
+
+    /// Source px → transformed px (green plane): the inverse of [`Warp::to_source`], by Newton's
+    /// method on it (the warps are smooth and close to the identity, so a few steps reach a
+    /// hundredth of a pixel). `None` when it doesn't converge (a point far outside a strong warp).
+    pub fn from_source(&self, s: Point) -> Option<Point> {
+        if !(s.x.is_finite() && s.y.is_finite()) {
+            return None;
+        }
+        let f = |p: Point| self.to_source(p, 1);
+        // start from where the perspective alone puts it (the lens part moves pixels little)
+        let mut t = self.from_corrected(s);
+        let h = 1e-3 * self.w.max(self.h).max(1.0);
+        for _ in 0..24 {
+            let v = f(t);
+            let (ex, ey) = (v.x - s.x, v.y - s.y);
+            if !(ex.is_finite() && ey.is_finite()) {
+                return None;
+            }
+            if ex.abs() < 1e-4 && ey.abs() < 1e-4 {
+                return Some(t);
+            }
+            let (dx, dy) = (f(Point::new(t.x + h, t.y)), f(Point::new(t.x, t.y + h)));
+            let (a, c) = ((dx.x - v.x) / h, (dx.y - v.y) / h);
+            let (b, d) = ((dy.x - v.x) / h, (dy.y - v.y) / h);
+            let det = a * d - b * c;
+            if !det.is_finite() || det.abs() < 1e-12 {
+                return None;
+            }
+            t = Point::new(t.x - (d * ex - b * ey) / det, t.y - (a * ey - c * ex) / det);
+        }
+        let v = f(t);
+        ((v.x - s.x).abs() < 1e-2 && (v.y - s.y).abs() < 1e-2).then_some(t)
     }
 
     /// Vignetting compensation gain at source position `src` (px).
@@ -185,24 +250,113 @@ impl Warp {
         g as f32
     }
 
-    /// Whether a source position lies on the image (with a half-pixel margin).
-    pub fn inside(&self, s: Point) -> bool {
-        s.x >= -0.5 && s.y >= -0.5 && s.x <= self.w + 0.5 && s.y <= self.h + 0.5
+    /// Whether a source position lies on the image (within [`edges`](Self::edges)).
+    fn inside(&self, s: Point) -> bool {
+        let (lo, hx, hy) = self.edges();
+        s.x >= lo && s.y >= lo && s.x <= hx && s.y <= hy
+    }
+
+    /// The source area that frames output pixels, `lo..=hx × lo..=hy`: the image with a half-pixel margin.
+    fn edges(&self) -> (f64, f64, f64) {
+        (-0.5, self.w + 0.5, self.h + 0.5)
+    }
+
+    /// The framing chain of output position `(x, y)` (`o2t`: output px → transformed px): its lens-corrected
+    /// position and its green-plane source position.
+    fn framing<T: Real>(&self, o2t: &Affine, x: T, y: T) -> ((T, T), (T, T)) {
+        let (tx, ty) = o2t.apply_real(x, y);
+        let (cx, cy) = self.to_corrected_real(tx, ty);
+        ((cx, cy), self.corrected_to_source_real(cx, cy, 1))
+    }
+
+    /// The reference framing of output pixel `(x, y)`: its lens-corrected and green-plane source positions if
+    /// the latter is [`inside`](Self::inside) the image, else `None` (the pixel is blank canvas).
+    pub fn frame(&self, o2t: &Affine, x: usize, y: usize) -> Option<(Point, Point)> {
+        let ((cx, cy), (gx, gy)) = self.framing(o2t, x as f64 + 0.5, y as f64 + 0.5);
+        let g = Point::new(gx, gy);
+        self.inside(g).then(|| (Point::new(cx, cy), g))
+    }
+
+    /// Whether output pixel `(x, y)` shows the image ([`frame`](Self::frame) is `Some`).
+    pub fn covers(&self, o2t: &Affine, x: usize, y: usize) -> bool {
+        self.frame(o2t, x, y).is_some()
+    }
+
+    /// [`covers`](Self::covers) for every pixel of the output block `x0..x1 × y0..y1` at once, when that is
+    /// certain: `Some(true)` if all are covered, `Some(false)` if none is, `None` if the block may straddle the
+    /// image edge (or can't be bounded) and each pixel must be decided alone.
+    ///
+    /// Why the answer equals the per-pixel decision: the block's pixel centres `x + 0.5` are exact `f64` values in
+    /// `[x0 + 0.5, x1 − 0.5]` (likewise y). [`framing`](Self::framing) evaluated with [`Interval`]s runs the very
+    /// same operations as its `f64` evaluation in [`frame`](Self::frame), each rounded outward, so its result
+    /// bounds the `f64` source position of every pixel of the block — the rounded values, not only the exact
+    /// ones (see [`Interval`]). Divisions by a range that may contain zero, the homography's denominator clamp
+    /// and overflow make the bounds undecided (NaN), and NaN fails every test below. So when the bounds lie
+    /// within [`edges`](Self::edges) every pixel's position does, and when they lie beyond one edge every
+    /// pixel's position does: the same `f64` comparisons [`inside`](Self::inside) makes, no margin needed.
+    pub fn block_coverage(&self, o2t: &Affine, x0: usize, x1: usize, y0: usize, y1: usize) -> Option<bool> {
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let px = Interval::new(x0 as f64 + 0.5, (x1 - 1) as f64 + 0.5);
+        let py = Interval::new(y0 as f64 + 0.5, (y1 - 1) as f64 + 0.5);
+        let (_, (sx, sy)) = self.framing(o2t, px, py);
+        let (lo, hx, hy) = self.edges();
+        if sx.lo() >= lo && sy.lo() >= lo && sx.hi() <= hx && sy.hi() <= hy {
+            Some(true)
+        } else if sx.hi() < lo || sy.hi() < lo || sx.lo() > hx || sy.lo() > hy {
+            Some(false)
+        } else {
+            None
+        }
     }
 }
 
 /// DNG `WarpRectilinear` source position for corrected position `p` (px) and plane `ch`.
 pub fn embedded_warp(wp: &EmbeddedWarp, p: Point, ch: usize, w: f64, h: f64) -> Point {
+    let (x, y) = embedded_warp_real(wp, p.x, p.y, ch, w, h);
+    Point::new(x, y)
+}
+
+/// [`embedded_warp`] for any [`Real`].
+fn embedded_warp_real<T: Real>(wp: &EmbeddedWarp, x: T, y: T, ch: usize, w: f64, h: f64) -> (T, T) {
     let (cx, cy) = (wp.center.x * w, wp.center.y * h);
     let m = (wp.radius * w.max(h)).max(1e-9);
     let [kr0, kr1, kr2, kr3, kt0, kt1] = wp.planes[ch.min(2)];
-    let dx = (p.x - cx) / m;
-    let dy = (p.y - cy) / m;
+    let dx = (x - cx) / m;
+    let dy = (y - cy) / m;
     let r2 = dx * dx + dy * dy;
-    let f = kr0 + r2 * (kr1 + r2 * (kr2 + r2 * kr3));
-    let sx = dx * f + kt0 * 2.0 * dx * dy + kt1 * (r2 + 2.0 * dx * dx);
-    let sy = dy * f + kt1 * 2.0 * dx * dy + kt0 * (r2 + 2.0 * dy * dy);
-    Point::new(cx + m * sx, cy + m * sy)
+    let f = (((r2 * kr3 + kr2) * r2 + kr1) * r2) + kr0;
+    let sx = dx * f + dx * (kt0 * 2.0) * dy + (r2 + dx * 2.0 * dx) * kt1;
+    let sy = dy * f + dx * (kt1 * 2.0) * dy + (r2 + dy * 2.0 * dy) * kt0;
+    (sx * m + cx, sy * m + cy)
+}
+
+/// DNG `WarpRectilinear2` source position for corrected position `p` (px) and plane `ch`.
+pub fn embedded_stage(st: &EmbeddedWarpStage, p: Point, ch: usize, w: f64, h: f64) -> Point {
+    let (x, y) = embedded_stage_real(st, p.x, p.y, ch, w, h);
+    Point::new(x, y)
+}
+
+/// [`embedded_stage`] for any [`Real`]: DNG specification 1.6.0.0, "WarpRectilinear2" — the radial term is
+/// `f(clamp(r, min_valid_radius, max_valid_radius))` with `f(r) = Σ krₚ rᵖ` (p = 0..14), used as `d·f` or, with
+/// `reciprocalRadial`, `d/f`; the tangential terms are those of `WarpRectilinear` (with the unclamped `r`).
+fn embedded_stage_real<T: Real>(st: &EmbeddedWarpStage, x: T, y: T, ch: usize, w: f64, h: f64) -> (T, T) {
+    let (cx, cy) = (st.center.x * w, st.center.y * h);
+    let m = (st.radius * w.max(h)).max(1e-9);
+    let k = &st.planes[ch.min(2)];
+    let dx = (x - cx) / m;
+    let dy = (y - cy) / m;
+    let r2 = dx * dx + dy * dy;
+    let r = r2.sqrt_nonneg().clamp_range(k[17], k[18]);
+    let mut f = r * k[14] + k[13];
+    for &c in k[..13].iter().rev() {
+        f = f * r + c;
+    }
+    let (rx, ry) = if st.reciprocal { (dx / f, dy / f) } else { (dx * f, dy * f) };
+    let sx = rx + dx * (k[15] * 2.0) * dy + (r2 + dx * 2.0 * dx) * k[16];
+    let sy = ry + dx * (k[16] * 2.0) * dy + (r2 + dy * 2.0 * dy) * k[15];
+    (sx * m + cx, sy * m + cy)
 }
 
 /// DNG `FixVignetteRadial` gain at source position `p` (px).
@@ -241,7 +395,20 @@ pub fn reorient_lens(lens: &EmbeddedLens, o: Orientation, w: f64, h: f64) -> Emb
         EmbeddedWarp { planes, center: map_pt(wp.center), radius: wp.radius * long_ratio }
     });
     let vignette = lens.vignette.map(|v| EmbeddedVignette { k: v.k, center: map_pt(v.center), radius: v.radius * long_ratio });
-    EmbeddedLens { warp, vignette }
+    let stages = lens.stages.map(|st| {
+        st.map(|st| {
+            let c = Point::new(st.center.x * w, st.center.y * h);
+            let c2 = o.map(c.x, c.y, w, h);
+            let planes = st.planes.map(|mut k| {
+                // same rotation of the tangential vector as for `WarpRectilinear`
+                let e = o.map(c.x + k[16], c.y + k[15], w, h);
+                (k[15], k[16]) = (e.1 - c2.1, e.0 - c2.0);
+                k
+            });
+            EmbeddedWarpStage { planes, center: map_pt(st.center), radius: st.radius * long_ratio, reciprocal: st.reciprocal }
+        })
+    });
+    EmbeddedLens { warp, vignette, stages, source: lens.source }
 }
 
 // ------------------------------------------------------------------------------------------ lateral CA
@@ -273,8 +440,9 @@ pub(crate) fn fingerprint(img: &Rgb32f) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ ((img.width as u64) << 32 | img.height as u64);
     let n = img.data.len();
     for i in 0..512usize {
-        let p = img.data[(i.wrapping_mul(2_654_435_761) ^ i) % n.max(1)];
-        for c in p {
+        // (an empty image has no pixels to sample: its dimensions are the fingerprint)
+        let Some(p) = img.data.get((i.wrapping_mul(2_654_435_761) ^ i) % n.max(1)) else { break };
+        for c in *p {
             h ^= c.to_bits() as u64;
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
@@ -435,31 +603,60 @@ fn hue_weight(h: f32, lo: f32, hi: f32) -> f32 {
 /// Long edge (px) at which defringe widths are specified: fringes are 1–7 px wide on a ~4000 px image.
 pub const DEFRINGE_REF_LONG: f64 = 4000.0;
 
-/// Defringe: desaturate purple / green colour fringes that sit next to high-contrast edges. `scale` is output
-/// pixels per reference pixel (output long edge / [`DEFRINGE_REF_LONG`]) so the fringe width is the same
-/// fraction of the image at any size.
-pub fn defringe(img: &mut Rgb32f, s: &DevelopSettings, scale: f64) {
+/// Defringe's resolved parameters (the CPU stage below and the GPU kernels both read these).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DefringeParams {
+    /// Radius (output px) of the lightness min / max filters that find edges.
+    pub radius: usize,
+    /// Purple and green OkLab hue ranges (degrees, lo ≤ hi) and strengths (0..1).
+    pub purple: (f32, f32),
+    pub green: (f32, f32),
+    pub purple_strength: f32,
+    pub green_strength: f32,
+}
+
+/// Defringe's parameters for `s` at `scale` output pixels per reference pixel, or `None` when it
+/// does nothing.
+pub fn defringe_params(s: &DevelopSettings, scale: f64) -> Option<DefringeParams> {
     let o = &s.optics;
     if !s.section_enabled("optics") || (o.defringe_purple_amount <= 0.0 && o.defringe_green_amount <= 0.0) {
-        return;
+        return None;
     }
-    let (w, h) = (img.width, img.height);
-    let max_amt = o.defringe_purple_amount.max(o.defringe_green_amount);
+    // as far as the sliders go (0–20): an amount from a damaged catalog or sidecar made the
+    // radius overflow
+    let max_amt = o.defringe_purple_amount.max(o.defringe_green_amount).min(20.0);
     // fringe width in source px grows with the amount (1..7 px), in output px at least one
-    let radius = ((1.0 + max_amt * 0.3) * scale).round().max(1.0) as usize;
-    // perceptual lightness and its local range (dilated contrast)
-    let lab: Vec<[f32; 3]> = img.data.iter().map(|p| oklab_from_2020([p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)])).collect();
-    let l = Plane { width: w, height: h, data: lab.iter().map(|p| p[0]).collect() };
-    let (lo, hi) = (min_filter(&l, radius, false), min_filter(&l, radius, true));
+    let radius = ((1.0 + max_amt * 0.3) * scale).round().max(1.0);
+    // (an absurd scale must not ask for a filter wider than any image; the stages clamp it to theirs)
+    let radius = if radius.is_finite() { radius.min(1e6) as usize } else { 1 };
     let range = |lo: f64, hi: f64, span: (f32, f32)| {
         let a = span.0 + (span.1 - span.0) * (lo / 100.0) as f32;
         let b = span.0 + (span.1 - span.0) * (hi / 100.0) as f32;
         (a.min(b), a.max(b))
     };
-    let pr = range(o.defringe_purple_hue_lo, o.defringe_purple_hue_hi, PURPLE_HUES);
-    let gr = range(o.defringe_green_hue_lo, o.defringe_green_hue_hi, GREEN_HUES);
-    let ps = (o.defringe_purple_amount / 8.0).min(1.0) as f32;
-    let gs = (o.defringe_green_amount / 8.0).min(1.0) as f32;
+    Some(DefringeParams {
+        radius,
+        purple: range(o.defringe_purple_hue_lo, o.defringe_purple_hue_hi, PURPLE_HUES),
+        green: range(o.defringe_green_hue_lo, o.defringe_green_hue_hi, GREEN_HUES),
+        purple_strength: (o.defringe_purple_amount / 8.0).min(1.0) as f32,
+        green_strength: (o.defringe_green_amount / 8.0).min(1.0) as f32,
+    })
+}
+
+/// Defringe: desaturate purple / green colour fringes that sit next to high-contrast edges. `scale` is output
+/// pixels per reference pixel (output long edge / [`DEFRINGE_REF_LONG`]) so the fringe width is the same
+/// fraction of the image at any size.
+pub fn defringe(img: &mut Rgb32f, s: &DevelopSettings, scale: f64) {
+    let Some(DefringeParams { radius, purple: pr, green: gr, purple_strength: ps, green_strength: gs }) = defringe_params(s, scale) else {
+        return;
+    };
+    let (w, h) = (img.width, img.height);
+    // never wider than the picture
+    let radius = radius.clamp(1, w.max(h).max(1));
+    // perceptual lightness and its local range (dilated contrast)
+    let lab: Vec<[f32; 3]> = img.data.iter().map(|p| oklab_from_2020([p[0].max(0.0), p[1].max(0.0), p[2].max(0.0)])).collect();
+    let l = Plane { width: w, height: h, data: lab.iter().map(|p| p[0]).collect() };
+    let (lo, hi) = (min_filter(&l, radius, false), min_filter(&l, radius, true));
     for_rows(&mut img.data, w, |y, row| {
         for (x, px) in row.iter_mut().enumerate() {
             let i = y * w + x;
@@ -511,100 +708,4 @@ fn min_filter(p: &Plane, r: usize, max: bool) -> Plane {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A grid of dark lines on white with lateral CA: red magnified by `ar`, blue by `ab` (about the centre).
-    fn ca_grid(w: usize, h: usize, ar: f64, ab: f64) -> Rgb32f {
-        let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-        let val = |x: f64, y: f64| -> f32 {
-            // smooth-edged discs on a grid (edges in every direction)
-            let cell = w as f64 / 10.0;
-            let (fx, fy) = ((x / cell).fract() - 0.5, (y / cell).fract() - 0.5);
-            let d = fx.hypot(fy) * cell - cell * 0.28;
-            (0.05 + 0.85 * (d / 1.2).clamp(-0.5, 0.5) + 0.425) as f32
-        };
-        Rgb32f::from_fn(w, h, |x, y| {
-            let (x, y) = (x as f64 + 0.5, y as f64 + 0.5);
-            let at = |a: f64| val(cx + (x - cx) / (1.0 + a), cy + (y - cy) / (1.0 + a));
-            [at(ar), at(0.0), at(ab)]
-        })
-    }
-
-    #[test]
-    fn ca_estimate_recovers_scale() {
-        let img = ca_grid(600, 400, 0.004, -0.003);
-        let [r, b] = estimate_lateral_ca_uncached(&img);
-        assert!((r - 0.004).abs() < 0.0008, "red {r}");
-        assert!((b + 0.003).abs() < 0.0008, "blue {b}");
-        let clean = ca_grid(600, 400, 0.0, 0.0);
-        let [r, b] = estimate_lateral_ca_uncached(&clean);
-        assert!(r.abs() < 0.0005 && b.abs() < 0.0005, "{r} {b}");
-    }
-
-    #[test]
-    fn warp_identity_and_distortion_direction() {
-        let s = DevelopSettings::default();
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        assert!(wp.is_identity());
-        let mut s = s;
-        s.optics.distortion = 50.0; // corrects barrel: corners sample from further in
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        let q = wp.to_source(Point::new(0.0, 0.0), 1);
-        assert!(q.x > 0.0 && q.y > 0.0);
-        let c = wp.to_source(Point::new(150.0, 100.0), 1);
-        assert!(c.dist(Point::new(150.0, 100.0)) < 1e-9);
-    }
-
-    #[test]
-    fn manual_vignette_brightens_corners() {
-        let mut s = DevelopSettings::default();
-        s.optics.vignetting = 100.0;
-        let wp = Warp::from_settings(300.0, 200.0, &s, None);
-        assert!((wp.gain(Point::new(150.0, 100.0)) - 1.0).abs() < 1e-6);
-        assert!(wp.gain(Point::new(0.0, 0.0)) > 2.0);
-    }
-
-    #[test]
-    fn reorient_keeps_centre_mapping() {
-        let lens = EmbeddedLens {
-            warp: Some(EmbeddedWarp { planes: [[1.0, 0.01, 0.0, 0.0, 0.001, 0.002]; 3], center: Point::new(0.4, 0.5), radius: 0.6 }),
-            vignette: Some(EmbeddedVignette { k: [0.2, 0.0, 0.0, 0.0, 0.0], center: Point::new(0.4, 0.5), radius: 0.6 }),
-        };
-        let r = reorient_lens(&lens, Orientation::Rotate90, 300.0, 200.0);
-        // rotate 90° cw: (x, y) → (h − y, x)
-        let c = r.warp.unwrap().center;
-        assert!((c.x - 0.5).abs() < 1e-9 && (c.y - 0.4).abs() < 1e-9, "{c:?}");
-        // a point's warped position transforms like the point itself
-        let p = Point::new(50.0, 30.0);
-        let s0 = embedded_warp(&lens.warp.unwrap(), p, 0, 300.0, 200.0);
-        let m = |q: Point| {
-            let (x, y) = Orientation::Rotate90.map(q.x, q.y, 300.0, 200.0);
-            Point::new(x, y)
-        };
-        let s1 = embedded_warp(&r.warp.unwrap(), m(p), 0, 200.0, 300.0);
-        assert!(s1.dist(m(s0)) < 1e-6, "{s1:?} vs {:?}", m(s0));
-    }
-
-    #[test]
-    fn defringe_removes_purple_at_edges_only() {
-        let mut s = DevelopSettings::default();
-        s.optics.defringe_purple_amount = 10.0;
-        // white | black edge with a purple column next to it, and a purple patch far from edges
-        let purple = [0.25f32, 0.05, 0.45];
-        let mut img = Rgb32f::from_fn(40, 20, |x, _| if x < 20 { [0.9; 3] } else { [0.02; 3] });
-        for y in 0..20 {
-            img.set(20, y, purple);
-        }
-        let flat = Rgb32f::filled(40, 20, purple);
-        let mut flat2 = flat.clone();
-        defringe(&mut img, &s, 1.0);
-        defringe(&mut flat2, &s, 1.0);
-        let chroma = |p: [f32; 3]| {
-            let l = oklab_from_2020(p);
-            l[1].hypot(l[2])
-        };
-        assert!(chroma(img.get(20, 10)) < chroma(purple) * 0.3);
-        assert!((chroma(flat2.get(20, 10)) - chroma(purple)).abs() < 1e-4);
-    }
-}
+mod tests;

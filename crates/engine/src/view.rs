@@ -19,6 +19,9 @@ pub enum LibrarySource {
     Folder,
     /// Photos whose original file can't be found (`library.missing`).
     Missing,
+    /// A folder the library's photos were imported from ([`crate::Session::library_folder`]),
+    /// and the folders inside it (`library.folders`).
+    LibraryFolder,
 }
 
 /// The folder a [`LibrarySource::Folder`] view shows.
@@ -49,7 +52,7 @@ impl LibrarySource {
             LibrarySource::RecentlyDeleted => f.deleted = true,
             LibrarySource::Picks => f.flag = Some(lightcraft_catalog::Flag::Pick),
             // the folder itself is filled in by the session (it holds the path)
-            LibrarySource::Folder | LibrarySource::Missing => {}
+            LibrarySource::Folder | LibrarySource::Missing | LibrarySource::LibraryFolder => {}
         }
         f
     }
@@ -62,6 +65,7 @@ impl LibrarySource {
             LibrarySource::RecentlyDeleted => "Recently Deleted".into(),
             LibrarySource::Picks => "Picks".into(),
             LibrarySource::Folder => "Folder".into(),
+            LibrarySource::LibraryFolder => "Folder".into(),
             LibrarySource::Missing => "Missing Photos".into(),
         }
     }
@@ -74,7 +78,27 @@ pub struct Selection {
     pub active: Option<PhotoId>,
 }
 
+/// How a photo relates to the selection: what every view draws (grid cell, filmstrip cell…).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionState {
+    NotSelected,
+    /// Selected, but not the photo the loupe and panels act on.
+    Selected,
+    /// The most-selected photo.
+    Active,
+}
+
 impl Selection {
+    /// What views draw for `id`: active, selected or neither (one answer for grid, filmstrip, …).
+    pub fn state_of(&self, id: PhotoId) -> SelectionState {
+        if self.active == Some(id) {
+            SelectionState::Active
+        } else if self.contains(id) {
+            SelectionState::Selected
+        } else {
+            SelectionState::NotSelected
+        }
+    }
     pub fn single(id: PhotoId) -> Selection {
         Selection { ids: vec![id], active: Some(id) }
     }
@@ -134,14 +158,30 @@ pub fn filter_chips(f: &Filter, cat: &Catalog) -> Vec<FilterChip> {
         };
         add(format!("Rating {op} {}★", f.rating), json!({"rating": 0}));
     }
-    if let Some(fl) = f.flag {
-        add(format!("Flag: {}", format!("{fl:?}").to_lowercase()), json!({"flag": Null}));
+    if let Some(shown) = f.flags_shown() {
+        let name = |fl: &lightcraft_catalog::Flag| format!("{fl:?}").to_lowercase();
+        let or = |fls: &[lightcraft_catalog::Flag]| fls.iter().map(name).collect::<Vec<_>>().join(" or ");
+        // empty: `flag` and `flags` exclude each other, so name both constraints
+        let names = if shown.is_empty() {
+            // parenthesised when plural, so "pick and reject or none" cannot read as "(pick and reject) or none"
+            let plural = if f.flags.len() > 1 { format!("({})", or(&f.flags)) } else { or(&f.flags) };
+            format!("{} and {plural}", f.flag.as_ref().map(name).unwrap_or_default())
+        } else {
+            or(&shown)
+        };
+        add(format!("Flag: {names}"), json!({"flag": Null, "flags": []}));
     }
-    let mut labels = f.labels.clone();
-    labels.extend(f.label.filter(|l| !labels.contains(l)));
-    if !labels.is_empty() {
-        let names: Vec<String> = labels.iter().map(|l| cat.label_name(*l)).collect();
-        add(format!("Label: {}", names.join(" or ")), json!({"label": Null, "labels": []}));
+    if let Some(shown) = f.labels_shown() {
+        let or = |ls: &[lightcraft_catalog::ColorLabel]| ls.iter().map(|l| cat.label_name(*l)).collect::<Vec<_>>().join(" or ");
+        // empty: `label` and `labels` exclude each other, so name both constraints
+        let names = if shown.is_empty() {
+            // parenthesised when plural, so "Red and Yellow or Green" cannot read as "(Red and Yellow) or Green"
+            let plural = if f.labels.len() > 1 { format!("({})", or(&f.labels)) } else { or(&f.labels) };
+            format!("{} and {plural}", f.label.map(|l| cat.label_name(l)).unwrap_or_default())
+        } else {
+            or(&shown)
+        };
+        add(format!("Label: {names}"), json!({"label": Null, "labels": []}));
     }
     if let Some(k) = f.kind {
         let n = match k {
@@ -163,13 +203,20 @@ pub fn filter_chips(f: &Filter, cat: &Catalog) -> Vec<FilterChip> {
     if let Some(e) = f.edited {
         add(if e { "Edited".into() } else { "Unedited".into() }, json!({"edited": Null}));
     }
-    for (name, key, val) in [("Camera", "camera", &f.camera), ("Lens", "lens", &f.lens), ("Keyword", "keyword", &f.keyword)] {
+    for (name, key, val) in
+        [("Camera", "camera", &f.camera), ("Lens", "lens", &f.lens), ("Keyword", "keyword", &f.keyword), ("Person", "person", &f.person)]
+    {
         if let Some(x) = val {
             add(format!("{name}: {x}"), json!({key: Null}));
         }
     }
     if let Some(d) = &f.date {
         add(format!("Date: {}", date_label(d)), json!({"date": Null}));
+    }
+    if let Some(d) = f.library_folder.as_deref().filter(|d| !d.trim().is_empty()) {
+        // the last two names, so two folders called "Pictures" are told apart
+        let name = lightcraft_catalog::folders::folder_label(d);
+        add(format!("Folder: {name}"), json!({"libraryFolder": Null}));
     }
     if let Some(d) = &f.imported {
         add(format!("Imported: {}", date_label(d)), json!({"imported": Null}));
@@ -181,10 +228,11 @@ pub fn filter_chips(f: &Filter, cat: &Catalog) -> Vec<FilterChip> {
         _ => {}
     }
     if let Some(rs) = f.rule_set.as_ref().filter(|r| !r.rules.is_empty()) {
-        add(format!("Rules: {}", rs.describe()), json!({"ruleSet": Null}));
+        add(format!("Rules: {}", rs.describe_with(cat)), json!({"ruleSet": Null}));
     }
-    if !f.only.is_empty() {
-        add(format!("Only {} photos", f.only.len()), json!({"only": []}));
+    if f.only_none || !f.only.is_empty() {
+        let n = if f.only_none { 0 } else { f.only.len() };
+        add(format!("Only {n} photos"), json!({"only": [], "onlyNone": false}));
     }
     v
 }
@@ -199,5 +247,20 @@ fn date_label(d: &str) -> String {
         ([y, _, day], Some(m)) => format!("{m} {}, {y}", day.trim_start_matches('0')),
         ([y, _], Some(m)) => format!("{m} {y}"),
         _ => d.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod selection_state_tests {
+    use super::*;
+    use lightcraft_catalog::PhotoId;
+
+    #[test]
+    fn select_all_marks_the_others_selected_and_one_active() {
+        let ids: Vec<PhotoId> = (1..=3).map(PhotoId).collect();
+        let s = Selection { ids: ids.clone(), active: Some(ids[0]) };
+        assert_eq!(s.state_of(ids[0]), SelectionState::Active);
+        assert_eq!(s.state_of(ids[1]), SelectionState::Selected);
+        assert_eq!(s.state_of(PhotoId(9)), SelectionState::NotSelected);
     }
 }

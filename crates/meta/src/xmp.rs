@@ -8,7 +8,8 @@
 //! Writing emits the interchange subset in standard namespaces (dc, xmp, photoshop, exif, exifEX, tiff, lr) and
 //! LightCraft's full develop settings as an opaque JSON string in `lc:settings`.
 
-use crate::{DateTime, Flash, Gps, Metadata, Orientation, parse_number};
+use crate::{DateTime, Flash, Gps, Metadata, Orientation, Region, RegionKind, parse_number};
+use lightcraft_geom::{Point, Rect};
 use quick_xml::escape::{escape, partial_escape};
 use quick_xml::events::Event;
 use std::collections::BTreeMap;
@@ -32,6 +33,11 @@ const NAMESPACES: &[(&str, &str)] = &[
     ("lc", LC_NS),
     // Read-only: develop settings written by other raw developers (interchange; see docs/xmp-interop.md).
     ("crs", CRS_NS),
+    // Read-only: face/pet/focus regions written by Lightroom, digiKam, Picasa and others (MWG Region
+    // Guidelines v2.0). Canonicalising these three lets a packet use any prefix for them.
+    ("mwg-rs", "http://www.metadataworkinggroup.com/schemas/regions/"),
+    ("stArea", "http://ns.adobe.com/xmp/sType/Area#"),
+    ("stDim", "http://ns.adobe.com/xap/1.0/sType/Dimensions#"),
 ];
 
 /// The camera-raw-settings namespace URI (prefix `crs`), read for interchange only.
@@ -63,11 +69,23 @@ pub struct XmpData {
     /// The opaque `lc:settings` JSON string, if present.
     pub lc_settings: Option<String>,
     /// Every property found, keyed `prefix:name` (struct fields as `prefix:name/prefix:field`); arrays keep
-    /// item order, language alternatives put `x-default` first.
+    /// item order, language alternatives put `x-default` first. Foreign namespaces that reuse a recognized
+    /// prefix use `Q{hex-encoded namespace URI}local` instead, so they cannot impersonate known properties.
     pub properties: BTreeMap<String, Vec<String>>,
     /// Every top-level property with its full structure (arrays of structs such as local
     /// corrections, which [`XmpData::properties`] flattens).
     pub values: BTreeMap<String, XmpValue>,
+}
+
+impl XmpData {
+    /// The pixel size the packet's regions were drawn on (`mwg-rs:AppliedToDimensions`), unless one of them says how
+    /// the photo was turned (`mwg-rs:Rotation`: Lightroom's boxes, which the reader already turns upright). It tells
+    /// boxes drawn on the photo as stored from boxes drawn on it upright: see [`crate::upright_regions`].
+    pub fn regions_drawn_on(&self) -> Option<(f64, f64)> {
+        let regions = self.values.get("mwg-rs:Regions")?;
+        let turned = regions.field("mwg-rs:RegionList").is_some_and(|l| l.items().iter().any(|r| r.field("mwg-rs:Rotation").is_some()));
+        if turned { None } else { applied_to(regions) }
+    }
 }
 
 /// A structured XMP value.
@@ -144,26 +162,51 @@ impl Node {
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 200_000;
+// Expanding a long namespace URI on many short names must not amplify a small packet without bound.
+pub(crate) const MAX_OPAQUE_NAME_BYTES: usize = 8 * 1024 * 1024;
 
-/// `prefix:local` with the prefix canonicalised by namespace URI (see [`NAMESPACES`]).
-pub(crate) fn canonical_name(qname: &str, scopes: &[Vec<(String, String)>]) -> String {
-    canonical(qname, scopes)
+/// Most text a converter's flattened property keys may add up to. Keys repeat their whole ancestor
+/// path (`parent/field`), so a document with a long nested name and a wide child fan-out otherwise
+/// retains its prefix once per property: node limits alone cannot bound that duplication.
+const MAX_KEY_BYTES: usize = 1 << 20;
+
+/// Names canonicalised by namespace URI (see [`NAMESPACES`]); conflicting foreign prefixes are opaque.
+pub(crate) fn canonical_name(qname: &str, scopes: &[Vec<(String, String)>], opaque_budget: &mut usize) -> Result<String, XmpError> {
+    canonical(qname, scopes, opaque_budget)
 }
 
-fn canonical(qname: &str, scopes: &[Vec<(String, String)>]) -> String {
+fn canonical(qname: &str, scopes: &[Vec<(String, String)>], opaque_budget: &mut usize) -> Result<String, XmpError> {
     let (prefix, local) = qname.split_once(':').unwrap_or(("", qname));
     if prefix == "xml" || prefix == "xmlns" {
-        return qname.to_string();
+        return Ok(qname.to_string());
     }
     let uri = scopes.iter().rev().flat_map(|s| s.iter().rev()).find(|(p, _)| p == prefix).map(|(_, u)| u.as_str());
-    match uri {
+    Ok(match uri {
         Some(u) => match NAMESPACES.iter().find(|(_, nu)| *nu == u) {
             Some((p, _)) => format!("{p}:{local}"),
+            None if NAMESPACES.iter().any(|(p, _)| *p == prefix) => {
+                // A foreign `lc:settings` must never match our `lc:*` ownership rule (nor may a
+                // foreign `xmp:Rating` become a rating). Braces cannot occur in an XML QName;
+                // hex keeps URI slashes out of the flattened property's `/` path separators.
+                let size =
+                    u.len().checked_mul(2).and_then(|n| n.checked_add(3)).and_then(|n| n.checked_add(local.len())).ok_or(XmpError::TooComplex)?;
+                *opaque_budget = opaque_budget.checked_sub(size).ok_or(XmpError::TooComplex)?;
+                let mut key = String::with_capacity(size);
+                key.push_str("Q{");
+                for byte in u.bytes() {
+                    for nibble in [byte >> 4, byte & 15] {
+                        key.push(char::from(if nibble < 10 { b'0' + nibble } else { b'a' + (nibble - 10) }));
+                    }
+                }
+                key.push('}');
+                key.push_str(local);
+                key
+            }
             None if prefix.is_empty() => local.to_string(),
             None => qname.to_string(),
         },
         None => qname.to_string(),
-    }
+    })
 }
 
 fn entity(name: &str) -> Option<char> {
@@ -176,16 +219,29 @@ fn entity(name: &str) -> Option<char> {
         _ => {
             let n = name.strip_prefix('#')?;
             let v = match n.strip_prefix(['x', 'X']) {
-                Some(h) => u32::from_str_radix(h, 16).ok()?,
-                None => n.parse().ok()?,
+                Some(h) if h.bytes().all(|b| b.is_ascii_hexdigit()) => u32::from_str_radix(h, 16).ok()?,
+                Some(_) => return None,
+                None if n.bytes().all(|b| b.is_ascii_digit()) => n.parse().ok()?,
+                None => return None,
             };
-            char::from_u32(v)?
+            char::from_u32(v).filter(|&c| is_xml_char(c))?
         }
     })
 }
 
+/// The XML 1.0 `Char` production (the surrogate range can't occur in a `char`).
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r') || (c >= '\u{20}' && c != '\u{FFFE}' && c != '\u{FFFF}')
+}
+
+/// Drop the characters XML 1.0 forbids, which strict parsers (Adobe XMP Toolkit, expat, libxml2) reject the
+/// whole document for.
+fn xml_safe(s: &str) -> String {
+    s.chars().filter(|&c| is_xml_char(c)).collect()
+}
+
 /// Unescape attribute values (predefined + numeric references; unknown references kept verbatim).
-fn unescape_attr(s: &str) -> String {
+pub(crate) fn unescape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -212,6 +268,7 @@ fn parse_tree(s: &str) -> Result<Node, XmpError> {
     let mut stack: Vec<Node> = vec![Node { name: "#root".into(), ..Default::default() }];
     let mut scopes: Vec<Vec<(String, String)>> = vec![vec![("xml".into(), "http://www.w3.org/XML/1998/namespace".into())]];
     let mut count = 0usize;
+    let mut opaque_budget = MAX_OPAQUE_NAME_BYTES;
     loop {
         let ev = reader.read_event().map_err(|e| XmpError::Xml(e.to_string()))?;
         match ev {
@@ -234,8 +291,9 @@ fn parse_tree(s: &str) -> Result<Node, XmpError> {
                     }
                 }
                 scopes.push(scope);
-                let name = canonical(&String::from_utf8_lossy(e.name().as_ref()), &scopes);
-                let attrs = raw_attrs.into_iter().map(|(k, v)| (canonical(&k, &scopes), v)).collect();
+                let name = canonical(&String::from_utf8_lossy(e.name().as_ref()), &scopes, &mut opaque_budget)?;
+                let attrs =
+                    raw_attrs.into_iter().map(|(k, v)| Ok((canonical(&k, &scopes, &mut opaque_budget)?, v))).collect::<Result<_, XmpError>>()?;
                 let node = Node { name, attrs, ..Default::default() };
                 if matches!(ev, Event::Empty(_)) {
                     scopes.pop();
@@ -246,13 +304,11 @@ fn parse_tree(s: &str) -> Result<Node, XmpError> {
                     stack.push(node);
                 }
             }
-            Event::End(_) => {
-                if stack.len() > 1 {
-                    let n = stack.pop().expect("len > 1");
-                    scopes.pop();
-                    if let Some(parent) = stack.last_mut() {
-                        parent.children.push(n);
-                    }
+            Event::End(_) if stack.len() > 1 => {
+                let Some(n) = stack.pop() else { return Err(XmpError::Xml("end tag without an open element".into())) };
+                scopes.pop();
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(n);
                 }
             }
             Event::Text(t) => {
@@ -284,28 +340,40 @@ fn parse_tree(s: &str) -> Result<Node, XmpError> {
     }
     // close unterminated elements leniently
     while stack.len() > 1 {
-        let n = stack.pop().expect("len > 1");
-        stack.last_mut().expect("root").children.push(n);
+        let Some(n) = stack.pop() else { return Err(XmpError::Xml("unterminated element without a node".into())) };
+        let Some(parent) = stack.last_mut() else { return Err(XmpError::Xml("unterminated element without a parent".into())) };
+        parent.children.push(n);
     }
-    Ok(stack.pop().expect("root"))
+    stack.pop().ok_or_else(|| XmpError::Xml("xmp packet without a root element".into()))
 }
 
 fn is_rdf_meta_attr(k: &str) -> bool {
     matches!(k, "rdf:about" | "rdf:ID" | "rdf:nodeID" | "xml:lang" | "rdf:parseType" | "rdf:resource" | "rdf:datatype") || k.starts_with("xmlns")
 }
 
-fn collect_description(d: &Node, prefix: &str, props: &mut BTreeMap<String, Vec<String>>) {
+fn collect_description(d: &Node, prefix: &str, props: &mut BTreeMap<String, Vec<String>>, budget: &mut usize) {
     for (k, v) in &d.attrs {
-        if !is_rdf_meta_attr(k) {
+        if !is_rdf_meta_attr(k) && take_key_bytes(&format!("{prefix}{k}"), budget) {
             props.entry(format!("{prefix}{k}")).or_default().push(v.clone());
         }
     }
     for c in &d.children {
-        collect_property(c, prefix, props);
+        collect_property(c, prefix, props, budget);
     }
 }
 
-fn collect_property(p: &Node, prefix: &str, props: &mut BTreeMap<String, Vec<String>>) {
+/// Charge one flattened key's length to the key budget; `false` when the budget is spent (the
+/// property is then left out, like other elements a limit has cut).
+fn take_key_bytes(key: &str, budget: &mut usize) -> bool {
+    let n = key.len();
+    if *budget < n {
+        return false;
+    }
+    *budget -= n;
+    true
+}
+
+fn collect_property(p: &Node, prefix: &str, props: &mut BTreeMap<String, Vec<String>>, budget: &mut usize) {
     let key = format!("{prefix}{}", p.name);
     if let Some(arr) = p.children.iter().find(|c| matches!(c.name.as_str(), "rdf:Seq" | "rdf:Bag" | "rdf:Alt")) {
         let mut items: Vec<(bool, String)> = arr
@@ -319,29 +387,36 @@ fn collect_property(p: &Node, prefix: &str, props: &mut BTreeMap<String, Vec<Str
         if arr.name == "rdf:Alt" {
             items.sort_by_key(|(default, _)| !*default);
         }
-        props.entry(key).or_default().extend(items.into_iter().map(|(_, v)| v));
+        if take_key_bytes(&key, budget) {
+            props.entry(key).or_default().extend(items.into_iter().map(|(_, v)| v));
+        }
         return;
     }
     let struct_prefix = format!("{key}/");
     if p.attr("rdf:parseType") == Some("Resource") {
         for c in &p.children {
-            collect_property(c, &struct_prefix, props);
+            collect_property(c, &struct_prefix, props, budget);
         }
         return;
     }
     if let Some(d) = p.children.iter().find(|c| c.name == "rdf:Description") {
-        collect_description(d, &struct_prefix, props);
+        collect_description(d, &struct_prefix, props, budget);
         return;
     }
     let field_attrs: Vec<&(String, String)> = p.attrs.iter().filter(|(k, _)| !is_rdf_meta_attr(k)).collect();
     if !field_attrs.is_empty() && p.children.is_empty() && p.text.trim().is_empty() {
         for (k, v) in field_attrs {
-            props.entry(format!("{struct_prefix}{k}")).or_default().push(v.clone());
+            let full = format!("{struct_prefix}{k}");
+            if take_key_bytes(&full, budget) {
+                props.entry(full).or_default().push(v.clone());
+            }
         }
         return;
     }
     let v = p.attr("rdf:resource").map(str::to_string).unwrap_or_else(|| p.text.trim().to_string());
-    props.entry(key).or_default().push(v);
+    if take_key_bytes(&key, budget) {
+        props.entry(key).or_default().push(v);
+    }
 }
 
 fn find_descriptions<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
@@ -374,10 +449,85 @@ fn parse_gps_coord(s: &str) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
+/// `mwg-rs:Regions` → every region in its `RegionList`, converted to the full-image normalized frame.
+/// Malformed or out-of-range entries are skipped rather than rejecting the whole list: one bad region
+/// (from Lightroom, digiKam, Picasa, or a hand-edited file) shouldn't hide the rest.
+fn parse_regions(regions: &XmpValue) -> Vec<Region> {
+    // `AppliedToDimensions` documents the pixel size regions were authored against. Here it's only consulted
+    // for the rare region whose own Area is in pixel units instead of MWG's normalized default below.
+    let px_dims = applied_to(regions);
+    let Some(list) = regions.field("mwg-rs:RegionList") else { return Vec::new() };
+    list.items().iter().filter_map(|item| parse_one_region(item, px_dims)).collect()
+}
+
+/// `mwg-rs:AppliedToDimensions` of a `mwg-rs:Regions` struct: (width, height) in pixels, both positive.
+fn applied_to(regions: &XmpValue) -> Option<(f64, f64)> {
+    regions.field("mwg-rs:AppliedToDimensions").and_then(|d| {
+        let w = d.field("stDim:w").and_then(XmpValue::text).and_then(parse_number)?;
+        let h = d.field("stDim:h").and_then(XmpValue::text).and_then(parse_number)?;
+        (w > 0.0 && h > 0.0).then_some((w, h))
+    })
+}
+
+fn parse_one_region(item: &XmpValue, px_dims: Option<(f64, f64)>) -> Option<Region> {
+    let area = item.field("mwg-rs:Area")?;
+    let num_attr = |k: &str| area.field(k).and_then(XmpValue::text).and_then(parse_number);
+    // stArea:x/y are the region's CENTER, not its top-left corner (MWG Region Guidelines §Area).
+    let (cx, cy, w, h) = (num_attr("stArea:x")?, num_attr("stArea:y")?, num_attr("stArea:w")?, num_attr("stArea:h")?);
+    let finite_and_sane = [cx, cy, w, h].iter().all(|v| v.is_finite() && v.abs() <= 1.0e6);
+    if !finite_and_sane || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    // `stArea:unit` is "normalized" (a fraction of AppliedToDimensions) in every writer we know of, and
+    // that needs no cross-referencing at all. Only a region that explicitly says "pixel" gets divided
+    // down, and only if AppliedToDimensions is there to divide by; otherwise it's dropped rather than
+    // stored as a nonsense fraction.
+    let is_pixels = area.field("stArea:unit").and_then(XmpValue::text).is_some_and(|u| u.eq_ignore_ascii_case("pixel"));
+    let (cx, cy, w, h) = match (is_pixels, px_dims) {
+        (false, _) => (cx, cy, w, h),
+        (true, Some((dw, dh))) => (cx / dw, cy / dh, w / dw, h / dh),
+        (true, None) => return None,
+    };
+    // Lightroom Classic stores the box of a photo with Exif orientation 3 / 6 / 8 in the sensor's own
+    // frame and writes the orientation as the region's `mwg-rs:Rotation` (π for 3, −π/2 for 6, +π/2 for
+    // 8; 0 for 1) while `AppliedToDimensions` names the upright size. Turn it into the upright frame.
+    // MWG has no way to say "mirrored", so orientations 2/4/5/7 can't be told apart from their unmirrored
+    // twins here; boxes on mirrored photos are taken as written (see LR-LIB-PEOPLE in docs/parity-checklist.md).
+    let rotation = item.field("mwg-rs:Rotation").and_then(XmpValue::text).and_then(parse_number).filter(|r| r.is_finite());
+    let (quarter, half) = (std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    let (cx, cy, w, h) = match rotation {
+        Some(r) if (r + quarter).abs() < 0.05 => (1.0 - cy, cx, h, w),
+        Some(r) if (r - quarter).abs() < 0.05 => (cy, 1.0 - cx, h, w),
+        Some(r) if (r.abs() - half).abs() < 0.05 => (1.0 - cx, 1.0 - cy, w, h),
+        _ => (cx, cy, w, h),
+    };
+    // Keep only the part of the box inside the photo: a region hanging off an edge (common for faces
+    // cut by the frame) is clipped, and one entirely outside it (hostile or stale) is dropped, so every
+    // stored rect is within 0..1 and non-empty.
+    let rect = Rect::from_center(Point::new(cx, cy), w, h).intersect(&Rect::UNIT);
+    if rect.is_empty() {
+        return None;
+    }
+    let name = item.field("mwg-rs:Name").and_then(XmpValue::text).map(str::to_string).filter(|s| !s.is_empty());
+    let description = item.field("mwg-rs:Description").and_then(XmpValue::text).map(str::to_string).filter(|s| !s.is_empty());
+    let kind = match item.field("mwg-rs:Type").and_then(XmpValue::text).unwrap_or("") {
+        t if t.eq_ignore_ascii_case("face") => RegionKind::Face,
+        t if t.eq_ignore_ascii_case("pet") => RegionKind::Pet,
+        t if t.eq_ignore_ascii_case("focus") => RegionKind::Focus,
+        t if t.eq_ignore_ascii_case("barcode") => RegionKind::BarCode,
+        t => RegionKind::Other(t.to_string()),
+    };
+    Some(Region { rect, kind, name, description })
+}
+
 fn fmt_gps_coord(v: f64, pos: char, neg: char) -> String {
     let a = v.abs();
-    let d = a.trunc();
-    let m = (a - d) * 60.0;
+    let mut d = a.trunc();
+    let mut m = ((a - d) * 60.0 * 1e6).round() / 1e6;
+    if m >= 60.0 {
+        d += 1.0;
+        m = 0.0;
+    }
     format!("{},{:.6}{}", d as i64, m, if v < 0.0 { neg } else { pos })
 }
 
@@ -389,8 +539,10 @@ pub fn parse_xmp(s: &str) -> Result<XmpData, XmpError> {
     find_descriptions(&tree, &mut descs);
     let mut props = BTreeMap::new();
     let mut values = BTreeMap::new();
+    // One budget for the whole document: several descriptions cannot each spend a fresh one.
+    let mut key_budget = MAX_KEY_BYTES;
     for d in descs {
-        collect_description(d, "", &mut props);
+        collect_description(d, "", &mut props, &mut key_budget);
         if let XmpValue::Struct(m) = node_struct(d) {
             values.extend(m);
         }
@@ -414,8 +566,8 @@ pub fn parse_xmp(s: &str) -> Result<XmpData, XmpError> {
         metering_mode: num("exif:MeteringMode").map(|v| v as u16),
         white_balance: num("exif:WhiteBalance").map(|v| v as u16),
         orientation: num("tiff:Orientation").map(|v| v as u16).filter(|v| (1..=8).contains(v)).map(Orientation::from_exif),
-        width: num("tiff:ImageWidth").or_else(|| num("exif:PixelXDimension")).map(|v| v as u32),
-        height: num("tiff:ImageLength").or_else(|| num("exif:PixelYDimension")).map(|v| v as u32),
+        width: num("tiff:ImageWidth").filter(|v| *v >= 0.0).or_else(|| num("exif:PixelXDimension").filter(|v| *v >= 0.0)).map(|v| v as u32),
+        height: num("tiff:ImageLength").filter(|v| *v >= 0.0).or_else(|| num("exif:PixelYDimension").filter(|v| *v >= 0.0)).map(|v| v as u32),
         title: first("dc:title"),
         caption: first("dc:description"),
         alt_text: first("Iptc4xmpCore:AltTextAccessibility"),
@@ -436,10 +588,7 @@ pub fn parse_xmp(s: &str) -> Result<XmpData, XmpError> {
         label: first("xmp:Label"),
         ..Default::default()
     };
-    m.iso = num("exif:ISOSpeedRatings").or_else(|| num("exifEX:PhotographicSensitivity")).filter(|v| *v > 0.0).map(|v| v as u32);
-    if let Some(v) = props.get("exif:ISOSpeedRatings").and_then(|v| v.first()).and_then(|s| parse_number(s)) {
-        m.iso = Some(v as u32);
-    }
+    m.iso = [num("exif:ISOSpeedRatings"), num("exifEX:PhotographicSensitivity")].into_iter().flatten().find(|v| *v > 0.0).map(|v| v as u32);
     if let Some(spec) = props.get("exifEX:LensSpecification").filter(|v| v.len() == 4) {
         let v: Vec<f64> = spec.iter().filter_map(|s| parse_number(s)).collect();
         if v.len() == 4 {
@@ -466,10 +615,13 @@ pub fn parse_xmp(s: &str) -> Result<XmpData, XmpError> {
     }
     if let (Some(lat), Some(lon)) =
         (first("exif:GPSLatitude").and_then(|s| parse_gps_coord(&s)), first("exif:GPSLongitude").and_then(|s| parse_gps_coord(&s)))
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
     {
         let altitude = num("exif:GPSAltitude").map(|a| if first("exif:GPSAltitudeRef").as_deref() == Some("1") { -a } else { a });
         m.gps = Some(Gps { latitude: lat, longitude: lon, altitude });
     }
+    m.regions = values.get("mwg-rs:Regions").map(parse_regions).unwrap_or_default();
     let lc_settings = props.get("lc:settings").and_then(|v| v.first()).cloned();
     Ok(XmpData { metadata: m, lc_settings, properties: props, values })
 }
@@ -552,12 +704,12 @@ pub fn write_xmp_lc(meta: &Metadata, lc: &[(&str, &str)]) -> String {
     }
     x.push_str(">\n");
     for (k, v) in &simple {
-        x.push_str(&format!("   <{k}>{}</{k}>\n", escape(v.as_str())));
+        x.push_str(&format!("   <{k}>{}</{k}>\n", escape(xml_safe(v))));
     }
     for (k, v) in lc {
         if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             // element content: quotes needn't be escaped, which keeps the JSON readable
-            x.push_str(&format!("   <lc:{k}>{}</lc:{k}>\n", partial_escape(*v)));
+            x.push_str(&format!("   <lc:{k}>{}</lc:{k}>\n", partial_escape(xml_safe(v))));
         }
     }
     let array = |x: &mut String, k: &str, kind: &str, items: &[String], lang: bool| {
@@ -567,9 +719,9 @@ pub fn write_xmp_lc(meta: &Metadata, lc: &[(&str, &str)]) -> String {
         x.push_str(&format!("   <{k}>\n    <rdf:{kind}>\n"));
         for it in items {
             if lang {
-                x.push_str(&format!("     <rdf:li xml:lang=\"x-default\">{}</rdf:li>\n", escape(it.as_str())));
+                x.push_str(&format!("     <rdf:li xml:lang=\"x-default\">{}</rdf:li>\n", escape(xml_safe(it))));
             } else {
-                x.push_str(&format!("     <rdf:li>{}</rdf:li>\n", escape(it.as_str())));
+                x.push_str(&format!("     <rdf:li>{}</rdf:li>\n", escape(xml_safe(it))));
             }
         }
         x.push_str(&format!("    </rdf:{kind}>\n   </{k}>\n"));
@@ -605,163 +757,4 @@ pub fn write_xmp_lc(meta: &Metadata, lc: &[(&str, &str)]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn full() -> Metadata {
-        Metadata {
-            make: Some("Maker & Sons".into()),
-            model: Some("X <1>".into()),
-            serial_number: Some("SN1".into()),
-            software: Some("LightCraft".into()),
-            lens_make: Some("L".into()),
-            lens_model: Some("24-70mm".into()),
-            lens_serial_number: Some("LS".into()),
-            lens_spec: Some([24.0, 70.0, 2.8, 2.8]),
-            capture_time: DateTime::parse_iso("2022-05-06T07:08:09.123-04:00"),
-            exposure_time: Some(1.0 / 125.0),
-            f_number: Some(5.6),
-            iso: Some(800),
-            focal_length: Some(35.0),
-            focal_length_35mm: Some(52.0),
-            flash: Some(Flash { fired: true, raw: 0x59 }),
-            exposure_bias: Some(-1.0 / 3.0),
-            exposure_program: Some(2),
-            metering_mode: Some(3),
-            white_balance: Some(1),
-            orientation: Some(Orientation::Rotate270),
-            gps: Some(Gps { latitude: 48.858222, longitude: -2.2945, altitude: Some(-3.5) }),
-            width: Some(8000),
-            height: Some(6000),
-            artist: Some("Ann \"Photo\" Lee".into()),
-            copyright: Some("© 2022".into()),
-            copyright_marked: Some(true),
-            usage_terms: Some("Editorial use only; no <resale>".into()),
-            copyright_url: Some("https://example.com/licence?a=1&b=2".into()),
-            title: Some("Tïtle".into()),
-            caption: Some("Line one\nline two".into()),
-            alt_text: Some("A tree by the sea".into()),
-            extended_description: Some("Long <description>".into()),
-            sublocation: Some("Champ de Mars".into()),
-            city: Some("Paris".into()),
-            state: Some("Île-de-France".into()),
-            country: Some("France".into()),
-            keywords: vec!["tree".into(), "sky & sea".into()],
-            hierarchical_keywords: vec!["Places|France|Paris".into()],
-            rating: Some(-1),
-            label: Some("Green".into()),
-        }
-    }
-
-    #[test]
-    fn roundtrip_all_fields() {
-        let m = full();
-        let json = r#"{"version":1,"exposure":0.5,"note":"<&>"}"#;
-        let x = write_xmp(&m, Some(json));
-        let d = parse_xmp(&x).unwrap();
-        assert_eq!(d.lc_settings.as_deref(), Some(json));
-        let mut got = d.metadata.clone();
-        // floats go through rationals
-        assert!((got.exposure_bias.unwrap() + 1.0 / 3.0).abs() < 1e-5);
-        got.exposure_bias = m.exposure_bias;
-        let g = got.gps.unwrap();
-        assert!((g.latitude - 48.858222).abs() < 1e-6 && (g.longitude + 2.2945).abs() < 1e-6, "{g:?}");
-        got.gps = m.gps;
-        assert_eq!(got, m);
-    }
-
-    #[test]
-    fn empty_metadata_roundtrip() {
-        let x = write_xmp(&Metadata::default(), None);
-        let d = parse_xmp(&x).unwrap();
-        assert_eq!(d.metadata, Metadata::default());
-        assert_eq!(d.lc_settings, None);
-    }
-
-    #[test]
-    fn attribute_form_foreign_prefixes_and_structs() {
-        let x = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-            <rdf:Description rdf:about="" xmlns:a="http://ns.adobe.com/xap/1.0/" xmlns:d="http://purl.org/dc/elements/1.1/"
-               xmlns:e="http://ns.adobe.com/exif/1.0/" a:Rating="4" a:Label="Blue" e:FNumber="40/10" e:GPSLatitude="10,30N" e:GPSLongitude="20,15,36W">
-              <d:title><rdf:Alt><rdf:li xml:lang="de">Titel</rdf:li><rdf:li xml:lang="x-default">Title &amp; more &#233;</rdf:li></rdf:Alt></d:title>
-              <e:Flash><rdf:Description e:Fired="False" e:Mode="2"/></e:Flash>
-              <d:subject><rdf:Bag><rdf:li>k1</rdf:li><rdf:li>k2</rdf:li></rdf:Bag></d:subject>
-            </rdf:Description></rdf:RDF></x:xmpmeta>"#;
-        let d = parse_xmp(x).unwrap();
-        let m = d.metadata;
-        assert_eq!(m.rating, Some(4));
-        assert_eq!(m.label.as_deref(), Some("Blue"));
-        assert_eq!(m.f_number, Some(4.0));
-        assert_eq!(m.title.as_deref(), Some("Title & more é"));
-        assert_eq!(m.keywords, vec!["k1".to_string(), "k2".to_string()]);
-        assert_eq!(m.flash, Some(Flash { fired: false, raw: 0x10 }));
-        let g = m.gps.unwrap();
-        assert!((g.latitude - 10.5).abs() < 1e-9);
-        assert!((g.longitude + 20.26).abs() < 1e-9);
-        assert_eq!(d.properties["dc:title"], vec!["Title & more é".to_string(), "Titel".to_string()]);
-    }
-
-    /// Copyright status, usage terms and info URL (XMP Rights Management schema): written as
-    /// `xmpRights:Marked` (Boolean), `xmpRights:UsageTerms` (Lang Alt) and `xmpRights:WebStatement` (URI).
-    #[test]
-    fn rights_management_fields() {
-        let m = Metadata { copyright_marked: Some(false), usage_terms: Some("CC0".into()), ..Default::default() };
-        let x = write_xmp(&m, None);
-        assert!(x.contains("<xmpRights:Marked>False</xmpRights:Marked>"), "{x}");
-        assert!(x.contains("<xmpRights:UsageTerms>\n    <rdf:Alt>\n     <rdf:li xml:lang=\"x-default\">CC0</rdf:li>"), "{x}");
-        assert!(!x.contains("WebStatement"), "unset fields are left out");
-        assert_eq!(parse_xmp(&x).unwrap().metadata, m);
-        // attribute form, other prefixes; anything but True / False is "unknown"
-        let read = |marked: &str| {
-            let x = format!(
-                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-                <rdf:Description rdf:about="" xmlns:r="http://ns.adobe.com/xap/1.0/rights/" r:Marked="{marked}" r:WebStatement="https://example.org/c"/>
-                </rdf:RDF></x:xmpmeta>"#
-            );
-            parse_xmp(&x).unwrap().metadata
-        };
-        assert_eq!(read("True").copyright_marked, Some(true));
-        assert_eq!(read("false").copyright_marked, Some(false));
-        assert_eq!(read("").copyright_marked, None);
-        assert_eq!(read("maybe").copyright_marked, None);
-        assert_eq!(read("True").copyright_url.as_deref(), Some("https://example.org/c"));
-    }
-
-    #[test]
-    fn malformed_inputs() {
-        assert!(parse_xmp("<a><b></a>").is_ok() || parse_xmp("<a><b></a>").is_err());
-        assert_eq!(parse_xmp("").unwrap().metadata, Metadata::default());
-        assert_eq!(parse_xmp("not xml at all").unwrap().metadata, Metadata::default());
-        let deep = "<a>".repeat(1000);
-        assert_eq!(parse_xmp(&deep), Err(XmpError::TooComplex));
-        let x = write_xmp(&full(), Some("{}"));
-        for n in (0..x.len()).step_by(7) {
-            if x.is_char_boundary(n) {
-                let _ = parse_xmp(&x[..n]);
-            }
-        }
-    }
-
-    #[test]
-    fn lc_extras_and_crs_prefix() {
-        let x = write_xmp_lc(&Metadata::default(), &[("settings", "{\"a\":1}"), ("flag", "pick"), ("bad name", "x")]);
-        assert!(!x.contains("xmlns:crs"), "we never write crs:");
-        let d = parse_xmp(&x).unwrap();
-        assert_eq!(d.lc_settings.as_deref(), Some("{\"a\":1}"));
-        assert_eq!(d.properties["lc:flag"], vec!["pick".to_string()]);
-        assert!(!x.contains("bad name"));
-        let foreign = r#"<rdf:Description xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-            xmlns:cr="http://ns.adobe.com/camera-raw-settings/1.0/" cr:Exposure2012="+0.5"/>"#;
-        assert_eq!(parse_xmp(foreign).unwrap().properties["crs:Exposure2012"], vec!["+0.5".to_string()]);
-    }
-
-    #[test]
-    fn gps_coords() {
-        assert_eq!(parse_gps_coord("45,30N"), Some(45.5));
-        assert_eq!(parse_gps_coord("45,30,36S"), Some(-45.51));
-        assert_eq!(parse_gps_coord("45X"), None);
-        assert_eq!(parse_gps_coord(""), None);
-        assert_eq!(parse_gps_coord("é"), None);
-        assert_eq!(fmt_gps_coord(-45.51, 'N', 'S'), "45,30.600000S");
-    }
-}
+mod tests;

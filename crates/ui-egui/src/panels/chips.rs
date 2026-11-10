@@ -18,7 +18,8 @@ const TAIL: f32 = 170.0;
 /// "14 of 120 photos" when a filter narrows the source, else "14 photos".
 pub fn count_text(matching: usize, total: Option<usize>, filtering: bool) -> String {
     match total {
-        Some(t) if filtering && t != matching => crate::i18n::tr_format!("{matching} of {t} photos", matching = matching, t = t),
+        // (a held view can show more than now match its source: no "3 of 2")
+        Some(t) if filtering && t > matching => crate::i18n::tr_format!("{matching} of {t} photos", matching = matching, t = t),
         _ => crate::i18n::tr_format!("{matching} photos", matching = matching),
     }
 }
@@ -26,6 +27,77 @@ pub fn count_text(matching: usize, total: Option<usize>, filtering: bool) -> Str
 /// Width of a chip with `label` (text + the × button).
 fn chip_width(ui: &egui::Ui, label: &str, font: egui::FontId) -> f32 {
     ui.painter().layout_no_wrap(label.to_string(), font, egui::Color32::WHITE).size().x + 12.0 + 22.0
+}
+
+/// The colour labels a label chip names, in words ("Red or Blue").
+fn label_names(filter: &lightcraft_catalog::Filter, catalog: &lightcraft_catalog::Catalog) -> String {
+    use crate::i18n::tr;
+    let shown = filter.labels_shown().unwrap_or_default();
+    let name = |label: &lightcraft_catalog::ColorLabel| crate::i18n::color_label(catalog, *label);
+    let or = |labels: &[lightcraft_catalog::ColorLabel]| labels.iter().map(name).collect::<Vec<_>>().join(&format!(" {} ", tr("or")));
+    if !shown.is_empty() {
+        return or(&shown);
+    }
+    let plural = if filter.labels.len() > 1 { format!("({})", or(&filter.labels)) } else { or(&filter.labels) };
+    format!("{} {} {plural}", filter.label.as_ref().map(name).unwrap_or_default(), tr("and"))
+}
+
+/// The value of a `prefix: value` chip, localised.
+fn prefixed_value(prefix: &str, value: &str, filter: &lightcraft_catalog::Filter) -> String {
+    use crate::i18n::{date_group_label, tr};
+    let date = match prefix {
+        "Type" => return tr(value).to_string(),
+        "Date" => &filter.date,
+        "Imported" => &filter.imported,
+        _ => return value.to_string(),
+    };
+    date.as_ref().map_or_else(|| value.to_string(), |date| date_group_label(date, false))
+}
+
+/// Localise generated chip labels without rewriting search text or metadata values.
+pub(crate) fn display_label(chip: &FilterChip, filter: &lightcraft_catalog::Filter, catalog: &lightcraft_catalog::Catalog) -> String {
+    use crate::i18n::{date_group_label, rules_label, tr};
+    if crate::i18n::language() == crate::i18n::Locale::En {
+        return chip.label.clone();
+    }
+    if chip.clear.get("ruleSet").is_some()
+        && let Some(rules) = &filter.rule_set
+    {
+        return format!("{}: {}", tr("Rules"), rules_label(rules, catalog));
+    }
+    if chip.clear.get("label").is_some() {
+        return format!("{}: {}", tr("Label"), label_names(filter, catalog));
+    }
+    if chip.clear.get("flags").is_some() {
+        let shown = filter.flags_shown().unwrap_or_default();
+        let name = |flag: &lightcraft_catalog::Flag| tr(&format!("{flag:?}").to_lowercase()).to_string();
+        let or = |flags: &[lightcraft_catalog::Flag]| flags.iter().map(name).collect::<Vec<_>>().join(&format!(" {} ", tr("or")));
+        let names = if shown.is_empty() {
+            let plural = if filter.flags.len() > 1 { format!("({})", or(&filter.flags)) } else { or(&filter.flags) };
+            format!("{} {} {plural}", filter.flag.as_ref().map(name).unwrap_or_default(), tr("and"))
+        } else {
+            or(&shown)
+        };
+        return format!("{}: {names}", tr("Flag"));
+    }
+    if chip.clear.get("dateFrom").is_some() || chip.clear.get("dateTo").is_some() {
+        return match (&filter.date_from, &filter.date_to) {
+            (Some(from), Some(to)) => format!("{} {} – {}", tr("Captured"), date_group_label(from, false), date_group_label(to, false)),
+            (Some(from), None) => format!("{} {}", tr("Captured from"), date_group_label(from, false)),
+            (None, Some(to)) => format!("{} {}", tr("Captured until"), date_group_label(to, false)),
+            _ => chip.label.clone(),
+        };
+    }
+    if chip.clear.get("only").is_some() {
+        return format!("{} {}", tr("Only"), crate::i18n::tr_format!("{n} photos", n = if filter.only_none { 0 } else { filter.only.len() }));
+    }
+    if let Some((prefix, value)) = chip.label.split_once(": ") {
+        return format!("{}: {}", tr(prefix), prefixed_value(prefix, value, filter));
+    }
+    if let Some(value) = chip.label.strip_prefix("Rating ") {
+        return format!("{} {value}", tr("Rating"));
+    }
+    tr(&chip.label).to_string()
 }
 
 /// Draws the strip; does nothing without chips.
@@ -36,13 +108,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
     let t = Tokens::get(ui.ctx());
     let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover());
     ui.painter().rect_filled(bar, 0.0, t.canvas);
-    register(ui.ctx(), "filterchips", bar);
+    register(ui, "filterchips", bar);
     let font = t.font(12.0);
     let right = bar.right() - 16.0;
     let mut x = bar.left() + 20.0;
     let mut shown = 0;
     for (i, c) in chips.iter().enumerate() {
-        let w = chip_width(ui, &c.label, font.clone());
+        let label = display_label(c, &app.session.filter, &app.session.catalog);
+        let w = chip_width(ui, &label, font.clone());
         // always show the first chip; keep room for the tail unless this is the last one that fits
         let room = right - x - if i + 1 == chips.len() { 90.0 } else { TAIL };
         if i > 0 && w > room {
@@ -51,10 +124,11 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
         let r = Rect::from_min_size(pos2(x, bar.center().y - 11.0), vec2(w.min(right - x), 22.0));
         ui.painter().rect(r, 11.0, t.field, Stroke::new(1.0, t.accent.gamma_multiply(0.6)), StrokeKind::Inside);
         let text_r = Rect::from_min_max(r.min, pos2(r.right() - 22.0, r.max.y));
-        ui.painter().with_clip_rect(text_r).text(pos2(r.left() + 10.0, r.center().y), egui::Align2::LEFT_CENTER, &c.label, font.clone(), t.text);
+        ui.painter().with_clip_rect(text_r).text(pos2(r.left() + 10.0, r.center().y), egui::Align2::LEFT_CENTER, &label, font.clone(), t.text);
         let xr = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(18.0, 18.0));
-        let resp = ui.interact(xr, egui::Id::new(("filter-chip-x", i)), Sense::click()).on_hover_text(crate::i18n::tr("Remove this filter"));
-        register(ui.ctx(), format!("chip:{i}"), xr);
+        let resp = ui.interact(xr, egui::Id::unique(("filter-chip-x", i)), Sense::click()).on_hover_text(crate::i18n::tr("Remove this filter"));
+        crate::widgets::announce(&resp, format!("{}: {label}", crate::i18n::tr("Remove this filter")));
+        register(ui, format!("chip:{i}"), xr);
         let col = if resp.hovered() { t.text } else { t.text_dim };
         let m = 3.5;
         let (a, b) = (xr.center() - vec2(m, m), xr.center() + vec2(m, m));
@@ -77,10 +151,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
     child.spacing_mut().item_spacing.x = 8.0;
     let hidden = &chips[shown..];
     if !hidden.is_empty() {
-        let more = crate::widgets::text_button(&mut child, "chipsMore", &format!("+{} more", hidden.len()), false);
+        let more = crate::widgets::text_button(&mut child, "chipsMore", &crate::i18n::tr_format!("+{} more", hidden.len()), false);
         egui::Popup::menu(&more).show(|ui| {
             for c in hidden {
-                if ui.button(format!("{}  ✕", c.label)).on_hover_text(crate::i18n::tr("Remove this filter")).clicked() {
+                if ui
+                    .button(format!("{}  ✕", display_label(c, &app.session.filter, &app.session.catalog)))
+                    .on_hover_text(crate::i18n::tr("Remove this filter"))
+                    .clicked()
+                {
                     let _ = app.run("library.filter", c.clear.clone());
                     if c.clear.get("text").is_some() {
                         app.ui.search.clear();
