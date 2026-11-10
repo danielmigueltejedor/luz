@@ -1,13 +1,16 @@
-LightCraft app icon (lightcraft.svg and every file derived from it in this directory:
-lightcraft-small.svg, lightcraft-1024.png, lightcraft-macos-512.png, lightcraft.icns,
-lightcraft.ico, hicolor/).
+Luz app icon (lightcraft.svg, lightcraft-small.svg and every file derived from them in this
+directory, and the web favicon where the project has one).
 
-Original artwork made for this project by the LightCraft project owner in ArtCraft (no
-third-party material). Licensed like the rest of LightCraft, under either of
+The icon is a portrait of Louis Daguerre cut out, converted to black and white and placed over the
+app colour. It belongs to the Nodalia icon family: one historical figure per app.
+
+Source portrait: "Louis Daguerre 2.jpg", from Wikimedia Commons
+(https://commons.wikimedia.org/wiki/File:Louis_Daguerre_2.jpg).
+Status of the source: public domain.
+
+The derived icon is licensed like the rest of the project, under either of
 
   * Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
   * MIT license (https://opensource.org/licenses/MIT)
 
 at your option.
-
-Regenerate the derived files with packaging/icons.sh.
