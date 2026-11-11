@@ -89,6 +89,9 @@ install -m 644 "$LINUX/$APP_ID.mime.xml" "$STAGE/share/mime/packages/$APP_ID.xml
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$LIGHTCRAFT_BUILD_DATE/g" \
   "$LINUX/$APP_ID.metainfo.xml.in" >"$STAGE/share/metainfo/$APP_ID.metainfo.xml"
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
+
+# The .desktop names the icon dev.danielmiguelt.Luz (the Nodalia name); install it under that name too.
+for f in "$STAGE"/share/icons/hicolor/*/apps/"$APP_ID".*; do cp "$f" "${f%/*}/dev.danielmiguelt.Luz.${f##*.}"; done
 copy_docs "$STAGE/share/doc/lightcraft"
 
 for f in bin/lightcraft bin/lightcraft-cli "share/applications/$APP_ID.desktop" \
