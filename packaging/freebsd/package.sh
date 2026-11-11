@@ -91,7 +91,7 @@ sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$LIGHTCRAFT_BUILD_DATE/g" \
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
 
 # The .desktop names the icon dev.danielmiguelt.Luz (the Nodalia name); install it under that name too.
-for f in "$STAGE"/share/icons/hicolor/*/apps/"$APP_ID".*; do cp "$f" "${f%/*}/dev.danielmiguelt.Luz.${f##*.}"; done
+for f in "$STAGE"/share/icons/hicolor/*/apps/"$APP_ID".{png,svg}; do cp "$f" "${f%/*}/dev.danielmiguelt.Luz.${f##*.}"; done
 copy_docs "$STAGE/share/doc/lightcraft"
 
 for f in bin/lightcraft bin/lightcraft-cli "share/applications/$APP_ID.desktop" \
