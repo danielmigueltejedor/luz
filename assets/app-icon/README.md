@@ -16,8 +16,9 @@ Licence: see [LICENSE.txt](LICENSE.txt).
 app grid, like the Colloid icons around it: a 224 px tile inside a 256 px canvas (16 px margin),
 a 51.5 px corner radius and a soft shadow. The scalable SVG is made by `tools/nodalia-app-icon.py`
 in [nodalix-icon-theme](https://github.com/danielmigueltejedor/nodalix-icon-theme) and
-`packaging/icons.sh` renders the PNG sizes from it. macOS, Windows and the 1024 px render keep the
-full-bleed tile.
+`packaging/icons.sh` renders the PNG sizes from it. macOS, the Windows `.ico` and the
+1024 px render keep the full-bleed tile. The window and taskbar icon on Windows is the 256 px
+hicolor PNG, so it has the Linux margin and shadow.
 
 ## Files
 
@@ -36,8 +37,8 @@ The app id is `ai.storyteller.lightcraft`: the Wayland app id and the `.desktop`
 (`packaging/linux/ai.storyteller.lightcraft.desktop`). Its `Icon=` is the Nodalia name, `dev.danielmiguelt.Luz`,
 so an icon theme can tell Luz from the Craft app that shares the id; `packaging/linux/package.sh` installs the
 hicolor icons under both names, and the Flatpak keeps the app id as the icon name because Flatpak only exports
-icons named after it. To install by hand, copy `hicolor/` into `/usr/share/icons/hicolor/` (or
-`~/.local/share/icons/hicolor/`), copy each `ai.storyteller.lightcraft.*` there to `dev.danielmiguelt.Luz.*`, and put
+icons named after it. To install by hand, copy the contents of `hicolor/` into `/usr/share/icons/hicolor/`
+(`cp -R hicolor/. /usr/share/icons/hicolor/`, or `~/.local/share/icons/hicolor/`), copy each `ai.storyteller.lightcraft.*` there to `dev.danielmiguelt.Luz.*`, and put
 the `.desktop` file into `applications/`.
 
 ## Regenerate
