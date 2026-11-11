@@ -32,10 +32,13 @@ full-bleed tile.
 | `hicolor/<n>x<n>/apps/ai.storyteller.lightcraft.png` | Linux icon theme, 16-512 px; the 256 px one is also the runtime window icon on Windows and Linux |
 | `hicolor/scalable/apps/ai.storyteller.lightcraft.svg` | Linux scalable icon (Nodalix app grid) |
 
-The app id is `ai.storyteller.lightcraft`: the Wayland app id, the `.desktop` file
-(`packaging/linux/ai.storyteller.lightcraft.desktop`, `Icon=ai.storyteller.lightcraft`) and the hicolor icon
-name. To install on Linux, copy `hicolor/` into `/usr/share/icons/hicolor/` (or `~/.local/share/icons/hicolor/`)
-and the `.desktop` file into `applications/`.
+The app id is `ai.storyteller.lightcraft`: the Wayland app id and the `.desktop` file
+(`packaging/linux/ai.storyteller.lightcraft.desktop`). Its `Icon=` is the Nodalia name, `dev.danielmiguelt.Luz`,
+so an icon theme can tell Luz from the Craft app that shares the id; `packaging/linux/package.sh` installs the
+hicolor icons under both names, and the Flatpak keeps the app id as the icon name because Flatpak only exports
+icons named after it. To install by hand, copy `hicolor/` into `/usr/share/icons/hicolor/` (or
+`~/.local/share/icons/hicolor/`), copy each `ai.storyteller.lightcraft.*` there to `dev.danielmiguelt.Luz.*`, and put
+the `.desktop` file into `applications/`.
 
 ## Regenerate
 
