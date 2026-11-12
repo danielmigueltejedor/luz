@@ -63,7 +63,7 @@ unsupported to preview-only in the counts; sensor-decoding readiness is unchange
 - **2026-10-12 public sweep:** 30 further models on 40 CC0 files, independently downloaded and
   decoded on main `25ef65c8`; [raw/coverage-sweep.tsv](raw/coverage-sweep.tsv) records the URLs,
   SHA-256, dimensions, FNV-1a sensor hashes and render/reference luminance correlations (0.6801
-  to 0.9998). The hashes pin LightCraft's own output. The regression test is
+  to 0.9998). The hashes pin Luz's own output. The regression test is
   `crates/raw/tests/it/coverage_sweep_corpus.rs`; downloads are in `RAW_SAMPLES`. Ten references are
   embedded TIFF images; the rest are JPEGs. FFF TIFF previews are not display-ready and check
   image structure only. Eleven candidate models were excluded for identity, provenance or
@@ -188,7 +188,7 @@ Neither names ORF or specifies its file layout. These references do not establis
 
 ## Demosaic, levels, crops and lens metadata
 
-| Stage | Target | LightCraft | Status |
+| Stage | Target | Luz | Status |
 |---|---|---|---|
 | Bayer demosaic | Adobe's own, plus AI "Raw Details" | AHD (default; blends its horizontal and vertical candidates where neither is clearly more homogeneous, so flat noise doesn't become a maze), PPG, bilinear (`crates/raw/src/demosaic`) | 🟡 quality unmeasured against Lightroom; demosaics before white balance (#1328, PR #1463); no Raw Details |
 | X-Trans demosaic | ✅ | in-house edge-weighted directional | 🟡 unmeasured |
@@ -208,7 +208,7 @@ Neither names ORF or specifies its file layout. These references do not establis
 
 ## Colour
 
-| Item | Adobe | LightCraft |
+| Item | Adobe | Luz |
 |---|---|---|
 | Default profile per model | Adobe Standard for every model (1,500 profile names in the bundle) | the DNG's own matrices; else a pooled profile (**10 bundled**: EOS D60, ILCA-99M2, ILCE-7CR, ILCE-7M4, ILCE-7RM5, X-H2S, X-T4, Nikon Z 6II, Z 8 and D5300); else a guarded per-file fit to the camera's embedded JPEG; else spectral matrices (**52 models**, rawtoaces-data, and the bodies sharing their sensors: 6 Fujifilm bodies take the X-T3's (X-T30, X-T30 II, X-Pro3, X100V, X-E4, X-M5) and 2 take the X-T4's (X-S10, X-S20)) or chart-measured ones (**1 model**, the EOS D60); else a neutral matrix |
 | Camera Matching looks | 481 models (plus phone-maker looks) | none (the per-file JPEG fit imitates the camera's own look) |
@@ -237,7 +237,7 @@ essentials user (the default look is what they keep).
 
 ## Lens profiles
 
-| Item | Adobe | LightCraft |
+| Item | Adobe | Luz |
 |---|---|---|
 | Profile database | 3,635 profile files, 56 makers, auto-selected | **0** (Adobe LCPs never used; no database of our own) |
 | In-file corrections | ✅ | DNG opcodes (WarpRectilinear, FixVignetteRadial, GainMap…) applied; Panasonic / Leica RW2 distortion (79 photos, 13 bodies, 11 lenses); Sony tag 0x7037 distortion for the ILCE-7RM4A (2 lenses) and ILCE-7M3 (3 lenses), full-frame Bayer 3:2 ILCE-7CR files with correction Auto or forced Auto (3 lenses; see sony-lens-corrections.md for residuals and limits) the ILCE-7RM6 (3 lenses, 54 photos) and the APS-C ILCE-6700 (3 lenses, 145 photos; 0.73 px worst, with a measured Sigma 10–18 mm exception at 10–10.5 mm; `sony-ilce7rm6-lens-corrections.md`); Nikon NikonNEFInfo distortion (tag `0xc7d5`, about the sensor-shifted optical centre) for the Z 6II and Z f: F-mount lenses on the FTZ within 0.2 px of the camera JPEG, Z lenses within 0.5–1.5 px except the 24-70's wide end (7 px median; `docs/nikon-lens-corrections.md`) |
@@ -306,7 +306,7 @@ Beyond decoding:
 | 2026-10-15 | minor | Lossy JPEG XL DNG tiles that declare a non-linear SDR transfer curve (sRGB, BT.709, DCI, gamma) decode with that curve restored instead of falling back to the embedded preview: Lightroom Classic 15.1 LinearRaw DNGs (Rec. 2100 primaries, sRGB curve; 2 private ILCE-7CM2 files) |
 | 2026-10-15 | minor | Hasselblad 3FR / FFF embedded previews: the uncompressed 8-bit RGB image, handed on as a baseline TIFF (checked on the CC0 H4D-40 FFF, 1217 × 913, and CFV 3FR, 218 × 218, upright through the file's orientation); counts unchanged |
 | 2026-10-15 | minor | Hasselblad 3FR / FFF get their own reader (`crates/raw/src/vendor/hasselblad.rs`): an FFF takes its colour matrix from the original 3FR header in tag `0xC51B` instead of developing with the neutral matrix; RGGB checked against the camera preview on the CC0 H4D-40 FFF and CFV 3FR; counts unchanged |
-| 2026-10-22 | patch | LR-PROF-IMPORT: a CC0 Nikon D750 ColorChecker profile (Calibrite PROFILER, matrix-only, Cool White Fluorescent + D55) and its chart NEFs are a pinned corpus (`D750_COLORCHECKER`); with it LightCraft develops the charts within mean ΔE2000 3.84 (flash) / 3.35 (indoor), max 7.77 / 5.24, of Lightroom Classic 15.6's renders; colour patches come out less saturated |
+| 2026-10-22 | patch | LR-PROF-IMPORT: a CC0 Nikon D750 ColorChecker profile (Calibrite PROFILER, matrix-only, Cool White Fluorescent + D55) and its chart NEFs are a pinned corpus (`D750_COLORCHECKER`); with it Luz develops the charts within mean ΔE2000 3.84 (flash) / 3.35 (indoor), max 7.77 / 5.24, of Lightroom Classic 15.6's renders; colour patches come out less saturated |
 | 2026-10-12 | minor | LR-PROF-IMPORT: the user's own DNG camera profiles (`.dcp`) import as camera profiles; none ship |
 | 2026-10-12 | minor | SR2/SRF folder discovery and shared CLI/MCP extensions; public DSC-R1 sensor import and DSC-F828 preview-only import agree with direct import. F828 reclassified as preview-only (219 preview, 37 unsupported in the current generated coverage); sensor-decoding scores unchanged |
 | 2026-10-14 | minor | Camera-coverage sweep (#1327): 30 models verified on 40 CC0 files (`coverage_sweep_corpus.rs`, `coverage-sweep.tsv`; `docs/raw/coverage.py` 515 → 545 verified rows); the counts above are not re-measured here. Sensor verification does not establish colour parity (#1277) |

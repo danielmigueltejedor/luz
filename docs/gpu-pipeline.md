@@ -34,7 +34,7 @@ when warped geometry rebuilds.
 wgpu loads the driver of **every** backend in an instance's set while it enumerates adapters — even
 when it then picks another one. A Vulkan driver that crashes there (issue #136: an access violation
 in Intel's `igvk64.dll` on a UHD 630 under Windows 11) takes the process down before any window
-appears, and a native crash cannot be caught. So LightCraft only lets wgpu touch the backends it
+appears, and a native crash cannot be caught. So Luz only lets wgpu touch the backends it
 means to use (`lightcraft_gpu::backend`), for its compute device *and* for the desktop window
 (eframe/egui-wgpu, `window_wgpu_options` in `apps/lightcraft/src/main.rs`):
 
@@ -75,7 +75,7 @@ Overrides (read once at launch):
 
 **DX12 shader compiler (issue #471).** Every instance (window and compute) compiles DX12 shaders with
 FXC (`d3dcompiler_47.dll`, part of Windows; `lightcraft_gpu::backend::backend_options`). wgpu's
-default, `Auto`, loads whichever `dxcompiler.dll` the DLL search path finds first. LightCraft ships
+default, `Auto`, loads whichever `dxcompiler.dll` the DLL search path finds first. Luz ships
 none, so that copy belongs to another program (a Windows SDK, a folder on `PATH`). An older copy without
 `dxil.dll` beside it (e.g. DXC 1.7) warns that the DXIL is unsigned, wgpu treats the warning as a
 compile error, its indirect-validation pipelines fail, the device is lost, and the window never opened
@@ -116,14 +116,14 @@ deadline of 2 s covers it all; past it the app quits anyway. A job pool that is 
 hosts, tests) waits for its running jobs the same way (`JobPool::shutdown`, `crates/preview/src/pool.rs`).
 
 **Crash sentinel.** The desktop app writes `gpu-init.marker` into its settings folder (next to
-`ui.json`: `%APPDATA%\LightCraft`, `~/Library/Application Support/LightCraft`,
+`ui.json`: `%APPDATA%\Luz`, `~/Library/Application Support/Luz`,
 `~/.config/lightcraft`) just before the compute device is created and its kernels are compiled (and, on the first
 AI denoise, before that network's kernels are) and removes it as soon as that returns, successfully or
 not (issue #250: Apple's Metal compiler, `MTLCompilerService`, aborting on a kernel on an older Intel
 Mac). A kernel the driver refuses without crashing is caught by wgpu error scopes: the log says why
 (`gpu: rendering on the CPU: …`) and renders stay on the CPU. `LIGHTCRAFT_GPU=0` (or Settings ▸
 uncheck *Use the GPU for rendering*) forces the CPU path from the start. If the marker is still there at the next launch, the process died inside
-the driver: LightCraft starts with GPU rendering off (the preference is saved unchecked), removes the
+the driver: Luz starts with GPU rendering off (the preference is saved unchecked), removes the
 marker and says so in a notice. Checking *Use the GPU for rendering* again tries the GPU once more
 (and re-arms the sentinel). Not with `LIGHTCRAFT_NO_PREFS` (tests, scripts), and not in a `--memory` session,
 which writes nothing: it neither arms the sentinel nor removes a marker it finds (it still starts with GPU
@@ -153,16 +153,16 @@ drawables), and the window used it from #136 until this change, so a drag reache
 texture uploads; renders run on the compute device), which is what `LOW_LATENCY` is meant for.
 During a live window resize egui-wgpu still uses three drawables on macOS.
 
-**Troubleshooting a crash at startup (Windows).** Start LightCraft from a `.cmd` file or a terminal
+**Troubleshooting a crash at startup (Windows).** Start Luz from a `.cmd` file or a terminal
 with `set LIGHTCRAFT_GPU_BACKEND=dx12` (the default since #136), or `=off` to keep the GPU out of
 rendering; `set VK_LOADER_DRIVERS_DISABLE=*igvk64*` (Vulkan loader) hides a specific Vulkan driver
 from every program started with it. Help ▸ System Info and `app.gpu` show the adapter and backend in
 use (e.g. `Intel(R) UHD Graphics 630 (Dx12)`).
 
-**LightCraft stops during an export or a render; the log says "device lost" (Windows, issue #1337).**
+**Luz stops during an export or a render; the log says "device lost" (Windows, issue #1337).**
 When the graphics driver resets the GPU (the Windows watchdog, a driver hang: DXGI `0x887A0005`, "GPU
 device instance has been suspended"), renders fall back to the CPU, but the window's renderer (egui-wgpu)
-panics on the lost device and LightCraft stops. It says so ("LightCraft stopped unexpectedly", not "could
+panics on the lost device and Luz stops. It says so ("Luz stopped unexpectedly", not "could
 not open its window") and records it in `gpu-lost.marker` in the settings folder: the next start turns
 *Use the GPU for rendering* off and says why once. Turn it back on in Settings ▸ Performance after a
 driver update.
@@ -174,7 +174,7 @@ walks the whole system drive while the window's GPU device is created (`D3D12Cre
 unresponsive window for minutes. The Vulkan driver shares that code, so another backend doesn't
 help. Set *Shader Cache Size* back to **Driver Default** (or any size); the setting is global, there
 is no per-program override. Other programs that create a DX12 or Vulkan device at startup hang the
-same way (PhotoCraft does). It is a driver issue: nothing in LightCraft itself
+same way (Lienzo does). It is a driver issue: nothing in Luz itself
 walks the drive.
 
 ## Where it is used

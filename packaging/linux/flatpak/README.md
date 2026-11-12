@@ -1,6 +1,6 @@
 # From-source Flatpak packaging
 
-`ai.storyteller.lightcraft.yml` builds LightCraft and `lightcraft-cli` from this
+`ai.storyteller.lightcraft.yml` builds Luz and `lightcraft-cli` from this
 repository inside the Flatpak SDK. Flatpak builders have no network access, so
 `cargo-sources.json` lists every crate and git source with a fixed checksum or
 commit. Regenerate it after changing `Cargo.lock`:

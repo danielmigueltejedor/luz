@@ -4,10 +4,10 @@ The Canon CRW (CIFF) decoder and its clean-room record (the frozen format, the v
 summary, the colour, geometry and metadata notes, the private-corpus summary and the source log)
 live in craft-libs:
 [`crates/crw/clean-room/`](https://github.com/storytold/craft-libs/tree/main/crates/crw/clean-room).
-The derivation trail and the frozen table-generation materials stay in LightCraft PR #3021.
-LightCraft uses the crate `craft-crw` through the adapter `crates/raw/src/vendor/crw.rs`.
+The derivation trail and the frozen table-generation materials stay in Luz PR #3021.
+Luz uses the crate `craft-crw` through the adapter `crates/raw/src/vendor/crw.rs`.
 
-What stays here is LightCraft's own colour work on these cameras:
+What stays here is Luz's own colour work on these cameras:
 
 - [`10-chart-calibration.md`](10-chart-calibration.md): the EOS D60 colour matrices fitted to
   ColorChecker captures, implemented in `crates/raw/src/chart_table.rs`.

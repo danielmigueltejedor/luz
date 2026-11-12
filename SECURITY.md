@@ -1,6 +1,6 @@
 # Security Policy
 
-LightCraft reads camera raw files, image formats, metadata and sidecars, imports other photo catalogs, downloads and runs machine-learning models, and exposes CLI, JSON control, and MCP automation. Treat files, paths, metadata, catalogs, model files, automation requests, and command parameters as potentially malicious.
+Luz reads camera raw files, image formats, metadata and sidecars, imports other photo catalogs, downloads and runs machine-learning models, and exposes CLI, JSON control, and MCP automation. Treat files, paths, metadata, catalogs, model files, automation requests, and command parameters as potentially malicious.
 
 ## Reporting a vulnerability
 
@@ -14,7 +14,7 @@ If no private channel can be established, withhold weaponized material and repor
 
 A useful report includes:
 
-- affected LightCraft version, commit, or release artifact;
+- affected Luz version, commit, or release artifact;
 - operating system, architecture, build profile (desktop or web), and relevant feature flags;
 - the affected component or path;
 - security impact and required attacker access;
@@ -38,7 +38,7 @@ Security reports may cover:
 
 - camera raw, DNG, TIFF, HEIF, JPEG and other image decoding, and EXIF/XMP metadata and sidecar parsing;
 - decompression bombs, oversized dimensions, integer overflow, memory exhaustion, recursion, or hangs;
-- the LightCraft catalog, and importing other catalogs and libraries (such as Lightroom catalogs);
+- the Luz catalog, and importing other catalogs and libraries (such as Lightroom catalogs);
 - import/export and filesystem path handling, including traversal, symlinks, and unsafe overwrite or move behavior;
 - downloading, verifying, unpacking and running machine-learning models (denoise, faces, masks);
 - engine command validation and serialization/deserialization;

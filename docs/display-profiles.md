@@ -1,10 +1,10 @@
 # Display (monitor) profiles
 
-LightCraft can show photos through the monitor's ICC profile, so colours are right on wide-gamut and calibrated
+Luz can show photos through the monitor's ICC profile, so colours are right on wide-gamut and calibrated
 displays. Without one, previews are sRGB, which a wide-gamut panel shows oversaturated.
 
 **macOS uses the screen's own profile** (the one System Settings ▸ Displays assigns) while none is chosen. macOS doesn't
-colour-manage LightCraft's window (wgpu leaves its Metal layer without a colour space, which Core Animation shows
+colour-manage Luz's window (wgpu leaves its Metal layer without a colour space, which Core Animation shows
 unmatched), so on a P3 screen previews used to look more saturated than the exported files in Preview or Photos (issue
 #787). The profile is read again about once a second, so moving the window to another screen is followed.
 
@@ -70,5 +70,5 @@ LUT-based profile's correction about 65 ms. Drafts during slider drags skip the 
 ## Not yet
 
 - X11's `_ICC_PROFILE`, and following the window across monitors on Linux (macOS and Windows do both, above).
-- Windows' advanced-colour profiles (what a monitor uses while Auto Color Management is on): LightCraft leaves colour
+- Windows' advanced-colour profiles (what a monitor uses while Auto Color Management is on): Luz leaves colour
   to Windows then.

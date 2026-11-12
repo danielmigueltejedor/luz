@@ -1,10 +1,10 @@
-# LightCraft roadmap
+# Luz roadmap
 
 **Stage: alpha** · next: beta, ~14 points and ~340–600 h away
 
 > **Last reviewed:** 2026-10-10 · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6 · **Changes:** [revision history](#revision-history)
 
-One-page summary of how close LightCraft is to Adobe Lightroom. Agents: read this, then pick work
+One-page summary of how close Luz is to Adobe Lightroom. Agents: read this, then pick work
 from [docs/gaps.md](docs/gaps.md). The full assessment, method and evidence are in
 [docs/target-app-parity.md](docs/target-app-parity.md).
 
