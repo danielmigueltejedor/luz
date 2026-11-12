@@ -201,10 +201,6 @@ impl eframe::App for App {
         // app after this and the session's last writes (face data) still go out under the lock.
         #[cfg(target_os = "macos")]
         self.0.session.release_library_lock();
-        // macOS only: the process ends below without dropping the app, so a ready update's helper
-        // starts here. Elsewhere dropping the app starts it.
-        #[cfg(target_os = "macos")]
-        self.0.start_pending_update();
         // macOS (#1331): end the process here, before eframe tears the window down, as Quit from
         // the menu bar already does (PR #444). AccessKit's macOS adapter subclasses the window's
         // content view and restores its class on teardown; AppKit's Touch Bar support observes
@@ -223,11 +219,6 @@ impl eframe::App for App {
 const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn main() -> eframe::Result {
-    // Windows: the update helper is a copy of this program started with `--finish-update`.
-    #[cfg(windows)]
-    if let Some(result) = craft_update::self_update::finish(&lightcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
-        std::process::exit(i32::from(result.is_err()));
-    }
     // First, so every start-up record is kept for the log file (`logging`).
     let logger = logging::install();
     lightcraft_engine::guard::install_hook(panic_log_path_with(|name| std::env::var_os(name), std::env::temp_dir()));
