@@ -6,7 +6,7 @@
     </picture>
   </a>
   <br><br>
-  <img src="https://raw.githubusercontent.com/danielmigueltejedor/luz/main/assets/app-icon/hicolor/512x512/apps/ai.storyteller.lightcraft.png" width="160" alt="Luz">
+  <img src="https://raw.githubusercontent.com/danielmigueltejedor/luz/main/assets/app-icon/hicolor/512x512/apps/ai.storyteller.lightcraft.png" width="192" alt="Luz">
   <h1>Luz</h1>
   <p><strong>A RAW developer and photo library for the Nodalia suite, built on the LightCraft engine.</strong></p>
 
