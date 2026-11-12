@@ -1,6 +1,6 @@
 # Focus points
 
-Most cameras record where they focused. LightCraft reads that point from the file, draws it over the photo and
+Most cameras record where they focused. Luz reads that point from the file, draws it over the photo and
 zooms to it, so checking whether the subject is sharp takes one key while culling. Lightroom shows no focus points
 (photographers add plug-ins for it); this goes beyond parity (tracker row `LR-VIEW-FOCUSPOINT`).
 
@@ -28,7 +28,7 @@ unchanged (no catalog format change).
 ## Photos imported earlier
 
 A library imported before focus points were read gets them by itself: when a library opens and some of its photos
-from a supported body have no point and haven't been looked at, LightCraft reads them in the background, with a
+from a supported body have no point and haven't been looked at, Luz reads them in the background, with a
 **Reading focus points** row in the activity stack (n of N; ✕ stops it). **Photo ▸ Read Focus Points**
 (`photo.readFocusPoints`) starts the same job by hand. Photo ▸ Reload from Disk still fills a missing point too, but it
 re-reads and hashes whole files and runs while you wait, so it is for a few photos, not a library.
@@ -48,7 +48,7 @@ re-reads and hashes whole files and runs while you wait, so it is for a few phot
   while you are around, so your own previews come first. Measured on a 5400 rpm USB drive, cold cache, 200 α1 / A7S III
   ARWs: 1.9 s (about 100 photos a second, 32 KB each), so a library of 58,796 raws takes about ten minutes at full
   pace instead of re-reading 2.25 TB.
-- **Saving**: what was read is committed every 200 photos (or every 3 seconds) as LightCraft's own bookkeeping: no
+- **Saving**: what was read is committed every 200 photos (or every 3 seconds) as Luz's own bookkeeping: no
   undo step, no sidecar written, and only `meta.focus` changes, on a photo that still has none and still points at the
   file that was read (a photo deleted, moved or relinked meanwhile is left for another run). Photos that turned out to
   have no point (manual focus, a centre-only Wide report) are listed in `focus-scanned.bin` beside the library, so they
@@ -71,7 +71,7 @@ and Panasonic record similar data and are later steps.
 ### Sony layout and evidence
 
 Tag identities and value names come from the public ExifTool tag-name documentation (Sony MakerNotes table). No
-third-party code was read or ported. Every field was confirmed on real files by comparing LightCraft's decoder with
+third-party code was read or ported. Every field was confirmed on real files by comparing Luz's decoder with
 ExifTool's output, run as a black box: 333 ARWs sampled across four years of a photographer's library (180 α1,
 153 A7S III; 12 portrait or upside-down, 54 in APS-C crop or reduced-size modes), with no mismatch in the point, frame or names.
 

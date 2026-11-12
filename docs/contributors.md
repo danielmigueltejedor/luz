@@ -1,6 +1,6 @@
 # Contributors in the About window
 
-**About ▸ Contributors** credits everyone who contributed to LightCraft, and **About ▸ Models** credits
+**About ▸ Contributors** credits everyone who contributed to Luz, and **About ▸ Models** credits
 the AI models named in `Co-Authored-By` trailers.
 
 ## Decision
@@ -20,9 +20,9 @@ the AI models named in `Co-Authored-By` trailers.
   first or last commit date. The name toggle cycles **Username → Display name → Real name**; a
   missing name falls back to `@username`. Alphabetical sorting is case-insensitive and ignores the `@`.
 
-## In LightCraft
+## In Luz
 
-- The About dialog (`crates/ui-egui/src/dialogs.rs`, Help ▸ About LightCraft) has the tabs
+- The About dialog (`crates/ui-egui/src/dialogs.rs`, Help ▸ About Luz) has the tabs
   **About · Contributors · Models**; the control channel can switch them with
   `ui.clickWidget {"id": "button:aboutTab-contributors"}` (`-about`, `-models`), and the list view
   with `button:creditsGrabBag` / `button:creditsTable`.

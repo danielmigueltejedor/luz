@@ -21,7 +21,7 @@ removed, and the blocks are put back with weights; a second step matches blocks 
 shrinks by a Wiener filter built from it. How hard it thresholds follows the photo's noise: gently at low noise, to
 keep fine detail, and harder as the noise grows. It then demosaics with
 edge-directed green and colour-difference red and blue. It is written for
-LightCraft, pure Rust, MIT OR Apache-2.0, has no weights and no download, and uses the
+Luz, pure Rust, MIT OR Apache-2.0, has no weights and no download, and uses the
 same tiling, cache, queue, preview and export path as a model. Its tile is 256 cells with a
 16-cell overlap. The filter (the grouping, the transforms and the putting back, which are nearly all of its work) runs on
 the graphics card when there is one that agrees with the processor and is faster (`crates/gpu/src/bm3d.rs`, WGSL kernels
@@ -250,7 +250,7 @@ export LIGHTCRAFT_DENOISE_TOKEN='a long random string, at least 16 characters'
 lightcraft-cli denoise-serve --listen 100.101.102.103:7990          # e.g. the machine's Tailscale address
 ```
 
-On the laptop, before LightCraft starts:
+On the laptop, before Luz starts:
 
 ```text
 export LIGHTCRAFT_DENOISE_URL=100.101.102.103:7990

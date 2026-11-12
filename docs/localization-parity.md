@@ -13,7 +13,7 @@ How far each interface language is from `full`. How to add or maintain a languag
 Lightroom 9.6 (installed on the owner's Mac) ships 16 interface languages, listed from its bundle's
 `.lproj` folder names: English, German, Spanish, French, Italian, Japanese, Korean, Norwegian Bokmål,
 Dutch, Polish, Portuguese (Brazil), Russian, Swedish, Thai, Simplified Chinese and Traditional
-Chinese. It does **not** ship Hindi, Arabic, Indonesian or Vietnamese, so for those LightCraft would
+Chinese. It does **not** ship Hindi, Arabic, Indonesian or Vietnamese, so for those Luz would
 go beyond the target.
 
 ## How the numbers are measured
@@ -42,7 +42,7 @@ contributors whose commits only touch that language (ja, zh-hans, zh-hant, fr, d
 that is promising but is not recorded as review, so the column says `no (community edits)`.
 
 Form of address: German speaks to the user with *du* ("Wähle ein Foto", "Dein Name"), never *Sie*.
-LightCraft is built by its community, and *du* is how people helping each other talk. A new German
+Luz is built by its community, and *du* is how people helping each other talk. A new German
 string follows that.
 
 ## The twelve key languages
@@ -62,7 +62,7 @@ string follows that.
 | 11 | Korean | `ko` | 0 (0%) | none | **no Korean (Hangul) face**: needs a non-Adobe OFL face in craft-fonts (Noto CJK is allowed only for Chinese) | no | none | 14–22 h |
 | 12 | Vietnamese | `vi` | 2,965 / 2,965 (2,658 plain + 307 formats; 100% of every non-What's New plain and format message across all catalogs) | menus, panels, dialogs, presets, profiles, dates, formats; lower-layer errors English | Latin with stacked diacritics (Inter) | no (community contribution) | partial (catalog complete; lower-layer errors English) | 1–3 h |
 
-## Other languages LightCraft ships (7)
+## Other languages Luz ships (7)
 
 | Language | Code | UI strings translated | Script | Native review | Status | To `full` |
 |---|---|---:|---|---|---|---:|
@@ -74,7 +74,7 @@ string follows that.
 | Finnish | `fi` | 2,610 / 3,308 (79%, measured 2026-10-17: 2,313 plain + 297 formats; the rest is What's New) | Latin (Inter) | yes (written with an agent; native-speaker review by @roopeg) | partial (lower-layer errors English) | 3–5 h |
 | Polish | `pl` | 2,159 messages + 291 formats; every format message translated (2026-10-15) | Latin (Inter) | no (AI-drafted; follow-up by a native speaker) | partial (lower-layer errors English) | 2–4 h (full native review) |
 
-Target languages LightCraft lacks: Korean, Dutch, Norwegian Bokmål, Thai
+Target languages Luz lacks: Korean, Dutch, Norwegian Bokmål, Thai
 (Thai needs shaping and line breaking without spaces). Each Latin-script one is ~10–16 h; Thai
 ~20–35 h on top of the shaping work.
 

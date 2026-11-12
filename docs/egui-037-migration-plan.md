@@ -1,4 +1,4 @@
-# LightCraft: egui 0.37 migration plan
+# Luz: egui 0.37 migration plan
 
 Current reconciliation (2026-10-25): this tree incorporates main `31ec62cd0387abecd8f2a2da034aee591447897d`. Managed CI `egui037-light-main31-ci-20261025-0829` passed all eight stages, including strict lint, HEIF and WASM checks: 5,086 passing test executions, zero failures and 42 ignored across 89 summaries. The prerequisite report separately identifies 149 tests that returned without exercising their checks (corpus 137, models 8, fonts 2, GPU 1, system 1); these are coverage gaps. Independent reconciliation review found no source blocker; its stale-status and pending-CI findings are addressed by this record. Native/browser GUI, platform, packaging/licence coverage and paired performance checks remain open. Human review and human merge are required; publication needs separate approval.
 
@@ -105,9 +105,9 @@ IDs, capture correlation, dropped-file replay) that a compiler diagnostic cannot
 
 | Item | Revision or value |
 |---|---|
-| LightCraft source baseline | `23e181283cb448205d865e8cd288b56afe987986` (`Release 0.13.0`) |
-| LightCraft lockfile | `Cargo.lock`, format version 4 |
-| LightCraft Rust baseline | workspace `rust-version = "1.90"`; `lightcraft-ui-egui` declares `1.95`; inspection toolchain `rustc 1.99.0` |
+| Luz source baseline | `23e181283cb448205d865e8cd288b56afe987986` (`Release 0.13.0`) |
+| Luz lockfile | `Cargo.lock`, format version 4 |
+| Luz Rust baseline | workspace `rust-version = "1.90"`; `lightcraft-ui-egui` declares `1.95`; inspection toolchain `rustc 1.99.0` |
 | Current egui family | `egui`, `epaint`, `ecolor`, `emath`, `eframe`, `egui-wgpu`, `egui-winit`, `egui_glow`, `epaint_default_fonts`, `egui_kittest` all `0.36.2` |
 | Current winit | `0.30.13` from crates.io, checksum `a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d` |
 | Current accessibility/test stack | `accesskit 0.24.1`, `accesskit_consumer` 0.35/0.36/0.38, `kittest 0.4.0`, `egui_kittest 0.36.2` |
@@ -120,10 +120,10 @@ IDs, capture correlation, dropped-file replay) that a compiler diagnostic cannot
 | Language work | craft-libs issue/PR 198 is a separate proposal, not a merged dependency and not included here |
 
 **Pin policy for this consumer.** `a4f9a17f` (egui) and `8b35388b` (winit) are *comparison and
-inspection* references only. LightCraft must pin the final reviewed **storytold** egui and winit
+inspection* references only. Luz must pin the final reviewed **storytold** egui and winit
 revisions by immutable full SHA **once the fork and winit series are published**. Those revisions do
 not exist yet, so this plan states no SHA for them and does not guess one. Every stage that needs
-them is explicitly blocked (§9, §10). LightCraft's production dependency is the complete reviewed
+them is explicitly blocked (§9, §10). Luz's production dependency is the complete reviewed
 and published storytold egui **P8** revision: E1–E21 plus **P2b** (E4 regular/PRIMARY with bounded
 asynchronous W15P transfer completion), **P7** held-key release pairing, **P7b/E21b** outgoing IME
 surrounding text, and **P7c** (the selected #8763/#8748 fixes and justified performance fixes). Its
@@ -181,7 +181,7 @@ turns eframe defaults off must add `clipboard` itself (`eframe/Cargo.toml:142-14
 
 | Root | Features after migration | Why |
 |---|---|---|
-| workspace `egui` | `default-features = false`, `features = ["default_fonts", "monochrome_emoji_fonts"]` | every resolution root needs the bundled faces: CLI snapshot, headless harnesses and unit tests never see eframe's features. Monochrome emoji are needed because user keywords/filenames carry emoji (`tests_keywording.rs:558-583` uses `🙂`) and 0.36's `default_fonts` supplied them. The workspace feature is what supplies LightCraft roots; `egui_kittest`'s own dev-dependency enables them only for upstream kittest's tests and does not propagate |
+| workspace `egui` | `default-features = false`, `features = ["default_fonts", "monochrome_emoji_fonts"]` | every resolution root needs the bundled faces: CLI snapshot, headless harnesses and unit tests never see eframe's features. Monochrome emoji are needed because user keywords/filenames carry emoji (`tests_keywording.rs:558-583` uses `🙂`) and 0.36's `default_fonts` supplied them. The workspace feature is what supplies Luz roots; `egui_kittest`'s own dev-dependency enables them only for upstream kittest's tests and does not propagate |
 | `lightcraft` (native) | eframe: `default_fonts`, `clipboard`, `wgpu`, `glow`, `accesskit`, `wayland`, `x11`; egui: workspace `monochrome_emoji_fonts` | `clipboard` restores the real OS clipboard; without it egui-winit simulates an in-process clipboard and cut/copy/paste, `RequestPaste` and the E4/W15P Wayland path are unavailable |
 | `lightcraft-web` | eframe: `default_fonts`, `glow`; egui: workspace `monochrome_emoji_fonts` | browser clipboard is not the egui-winit `clipboard` feature; the browser path is qualified separately |
 | `lightcraft-cli`, `lightcraft-ui-egui` | inherit the workspace `egui` features | headless rendering and kittest must resolve the same faces |
@@ -193,7 +193,7 @@ measured deliverable for both native and WASM (§7.2). Adding both faces must no
 **kittest does not supply these faces.** Its normal `[dependencies] egui` uses the workspace entry
 with `default-features = false`; only `egui_kittest`'s own `[dev-dependencies]` enables
 `default_fonts`/`monochrome_emoji_fonts` (`egui_kittest/Cargo.toml:39-42,65-68`), and a dependency's
-dev-dependencies do not propagate to consumers. LightCraft's workspace/root feature selection is
+dev-dependencies do not propagate to consumers. Luz's workspace/root feature selection is
 therefore what gives every CLI, headless and kittest root its faces; verify each produced graph with
 `cargo tree -e features`, as §5.3 requires.
 
@@ -214,9 +214,9 @@ introduced by 0.37, and do not mechanically rewrite `update` into `ui` where no 
 `run_logic` when hidden; the 0.37 source at `a4f9a17f` has the same shape (see §4.1). The real
 incompatibilities and semantic risks are these. In the table, `egui/src/...` means
 `crates/egui/src/...` in the egui checkout, and `egui_kittest/src/...` means
-`crates/egui_kittest/src/...`; LightCraft paths remain repository-relative.
+`crates/egui_kittest/src/...`; Luz paths remain repository-relative.
 
-| Change | Effect in LightCraft | Source anchor |
+| Change | Effect in Luz | Source anchor |
 |---|---|---|
 | `WidgetType` replaced by `accesskit::Role` (`egui::Role`), alias deprecated | `WidgetInfo` constructors and tests must use roles; `CollapsingHeader` becomes `DisclosureTriangle`, `SelectableLabel` becomes `Button`, `Checkbox` becomes `CheckBox` | `egui/src/lib.rs` 0.37 role alias/table; PR #8555 |
 | `Id::new` deprecated in favor of `Id::unique`; `AsIdSalt`/`IdSalt` are explicit | **221** `egui::Id::new` occurrences on 218 lines plus **three** bare `Id::new` calls (`menu_level.rs:19`, `canvas_keys.rs:15,20`, imported with `use egui::Id`) and **8** `Ui::id()` calls; the remaining `*Id::new` spellings are `LayerId`/`FontId`/`TextureId`, unrelated. `Id::new` and `Id::unique` hash identically, so persisted egui state does not reset | `egui/src/id.rs`; `egui/src/ui.rs:363-381`; PRs #8534/#8586/#8542 |
@@ -231,11 +231,11 @@ incompatibilities and semantic risks are these. In the table, `egui/src/...` mea
 | `Ui::id` renamed `scope_id`; `UiBuilder::id` renamed `scope_id` | Replace the 8 `ui.id()` uses; child UIs use `scope_id`; `id_salt` remains for local children | `ui.rs:363-381`; `ui_builder.rs:59-82` |
 | `Role`/AccessKit tree and strict kittest checks | kittest 0.37 panics on an input widget with no accessible name and on a missing glyph; `HarnessBuilder` defaults are `missing_glyph_policy: Panic`, `check_accessibility: true`, and the check runs after every settle and before every snapshot | `egui_kittest/src/builder.rs:46-60`; `accessibility.rs:26-42`; PRs #8589/#8611 |
 | TextEdit click-away selection regression in 0.37 | `text_field`'s custom Cut/Copy menu and toolbar actions that read the selection can see a collapsed range; keep the existing memo/store logic and add the #8763 regression | upstream #8763, open; PR #8764 open/unmerged |
-| `Style` defaults are roomier, TextEdit layout changes | LightCraft pins spacing/button padding/corner radii in `theme::apply_kind`, but menus, tooltips, scrollbars and plain dialogs can shift; review geometry/pixels, never auto-refresh | PRs #8617/#8445; `theme.rs:397-448` |
+| `Style` defaults are roomier, TextEdit layout changes | Luz pins spacing/button padding/corner radii in `theme::apply_kind`, but menus, tooltips, scrollbars and plain dialogs can shift; review geometry/pixels, never auto-refresh | PRs #8617/#8445; `theme.rs:397-448` |
 | PRIMARY selection support | New middle-click paste and PRIMARY publishing; verify separately from the normal clipboard, through E4 + W15P | PR #8428; E4; #8657 |
 | `egui_extras`/`egui_kittest` have independent version numbers | Do not infer versions from `egui`; `egui_plot` is unused | crate manifests at `0.37.0` |
 
-Not a 0.37 migration item: `Context::root_ui`/`run_pass` (new in 0.37) are not needed by LightCraft's
+Not a 0.37 migration item: `Context::root_ui`/`run_pass` (new in 0.37) are not needed by Luz's
 `App::ui`, which already receives the root `Ui`. Never call `ctx.root_ui` from inside `run_ui`,
 `App::ui` or `root_ui`; upstream #8535 documents the panic. Use the passed `&mut Ui`. Likewise, do
 not claim `App::logic` is new or replace `App::ui` with a `Context` bridge.
@@ -521,19 +521,19 @@ Anchors: `crates/ui-egui/src/lib.rs:909-987` (`drain_control`, `issue_screenshot
 `headless.rs:133-174` and `:310-349`.
 
 craft-libs selects one narrow completion-slot helper (`crates/ui/src/capture.rs`, CL-2) after the
-DesignCraft and GridCraft adapters, then freezes the public API (CL-2F). LightCraft is one of the
+Pliego and Celdas adapters, then freezes the public API (CL-2F). Luz is one of the
 craft-ui capture consumers and **adopts that helper** rather than keeping the local
 `mpsc::Receiver`/token design; names and signatures come from the reviewed CL-2F revision, not from
 this document. Every creative capture consumer adopts the CL-2F completion contract:
-`craft-ui-consumers-exact.json` shows eleven apps whose TOML declares `craft-ui` (LightCraft among
+`craft-ui-consumers-exact.json` shows eleven apps whose TOML declares `craft-ui` (Luz among
 them). All eleven require craft-libs **CL-1** and the frozen **CL-2F** API in the same atomic
-dependency stage as egui/winit; only DesignCraft/GridCraft pilot the provisional CL-2 API, and their
-adapters land before CL-2F freezes it. DeckCraft, FigCraft and ArtCraft Native use
+dependency stage as egui/winit; only Pliego/Celdas pilot the provisional CL-2 API, and their
+adapters land before CL-2F freezes it. Lámina, FigCraft and ArtCraft Native use
 contract-compatible local adapters without adding the crate, and all fourteen capture consumers
 remain in scope. (The earlier "thirteen craft-ui consumers" wording was wrong; it is not repeated
 here.)
 
-LightCraft's adapter (app-owned policy, shared completion transport):
+Luz's adapter (app-owned policy, shared completion transport):
 
 - **One record per admitted request**, owned by the app: monotonic request id, path, reply sender,
   `headless`, admission/deadlines (settle ≥3 painted frames and ≥120 ms; compositor fallback 2 s;
@@ -611,8 +611,8 @@ admission and completion (neither destination receives a screenshot).
 - `headless_host` remains the CLI/headless flag; `WebApp` does not set it, and the web path has no
   control server (§4.11, §8).
 - Boundary: the shared piece is only the completion slot. Request ids, paths, settle delays,
-  deadlines, reply schema and `Services.write/png` stay LightCraft policy in
-  `lightcraft-ui-egui`; do not grow a generic screenshot framework in craft-ui for LightCraft.
+  deadlines, reply schema and `Services.write/png` stay Luz policy in
+  `lightcraft-ui-egui`; do not grow a generic screenshot framework in craft-ui for Luz.
 
 ### 4.7 Panels, IDs and docking
 
@@ -670,7 +670,7 @@ root is hidden) is closed upstream but **not present** in the inspected fork sou
 the root is hidden/minimized remains an explicit real-platform test, not an assumed fix. Do not call
 `root_ui` from the viewport callback.
 
-Docking stays `craft_ui::docking::DockArea`. LightCraft is an LTR application and must state that
+Docking stays `craft_ui::docking::DockArea`. Luz is an LTR application and must state that
 policy explicitly at both call sites (`docking.rs:430`, `shortcuts.rs:339`) with the reviewed
 `DockArea::direction(DockDirection::LeftToRight)` builder from craft-libs §7.7 (exact name from the
 reviewed revision). Defaults must not be relied on. Persisted split first/second, axes, ratios,
@@ -686,7 +686,7 @@ Anchors: `crates/ui-egui/src/theme.rs:260-332` (`install_fonts_with_chinese`,
 `widgets.rs:1004-1020`, `tests/accessibility.rs`, `tests_keywording.rs:558-583`.
 
 - Enable `default_fonts` **and** `monochrome_emoji_fonts` on the workspace `egui` dependency, and
-  keep eframe defaults off in both apps while adding native `clipboard` (§2.1). This is a LightCraft
+  keep eframe defaults off in both apps while adding native `clipboard` (§2.1). This is a Luz
   root/workspace decision, not inherited from kittest: kittest's normal `egui` dependency is
   `default-features = false`, and only its own private dev-dependencies enable the fonts, which do
   not propagate. Verify every root (native, CLI/headless, kittest, wasm) resolves them through
@@ -736,7 +736,7 @@ Anchors: `crates/ui-egui/src/theme.rs:260-332` (`install_fonts_with_chinese`,
   recorder ignores them.
 - **E21b/P7b is a new blocking prerequisite, not existing E21 behaviour.** Candidate egui-winit
   never calls `WindowExtWayland::set_ime_surrounding_text`, and `egui::IMEOutput` carries no logical
-  text. The complete shared contract is in egui plan P7b and `ime-surrounding-gap.md`; LightCraft
+  text. The complete shared contract is in egui plan P7b and `ime-surrounding-gap.md`; Luz
   must take all of it, not a weaker subset:
   - owner/context-generation identity is present even when surrounding text is **Unavailable**. An
     available **empty** document is distinct from unavailable and is sent explicitly as an empty
@@ -757,9 +757,9 @@ Anchors: `crates/ui-egui/src/theme.rs:260-332` (`install_fonts_with_chinese`,
     separately measured baseline, not rewritten here;
   - built-in `TextEdit` produces the payload after delete/commit/cursor updates (logical model
     text, preedit removed, byte indices remapped) and the Wayland adapter sends it through W27.
-  LightCraft has no custom `IMEOutput` producer: its `TextField` wraps the built-in `TextEdit` and
+  Luz has no custom `IMEOutput` producer: its `TextField` wraps the built-in `TextEdit` and
   other panels use `TextEdit` directly, so it **inherits** the producer and must test the inherited
-  behaviour. The family's custom editors (FilmCraft `panels/graphics.rs` and the others in
+  behaviour. The family's custom editors (Toma `panels/graphics.rs` and the others in
   `ime-surrounding-gap.md`) need real logical-model/preedit/UTF-8-index adapters before family
   acceptance; `None` placeholders are not a completed port.
 - IME tests: outgoing surrounding text immediately after deletion-only and delete+commit batches;
@@ -859,12 +859,12 @@ Root `[patch.crates-io]` must name every used package at the same full SHA: `egu
 `egui_dock`, `egui_inspection` or `egui_system_font_provider` unless used. Never use a branch name
 or a machine-local path in a publishable manifest.
 
-`craft-ui`'s own `[patch]` does not propagate: LightCraft's root patch is what gives
+`craft-ui`'s own `[patch]` does not propagate: Luz's root patch is what gives
 `eframe`/`egui-winit` the fork. A graph that resolves `winit` from crates.io while `egui-winit`
 expects the fork API is a failure. `craft-ui` must compile against the stock egui 0.37 source API
 (PR 199's role/`scope_id`/`IdSalt` edits) so the shared crate stays publishable; fork-only APIs stay
 out of craft-ui. Pin `craft-ui` to the reviewed craft-libs revision and verify its `serde` feature
-under LightCraft's root patch.
+under Luz's root patch.
 
 ### 5.2 craft-libs: use the reconciled base, never the stale trees
 
@@ -1116,7 +1116,7 @@ P0 (external; BLOCKED until published)
     justified perf fixes), reviewed and published
   storytold winit immutable revision: complete W15P + W27 lifecycle (+ W15/W25/W26 series)
   craft-libs CL-1 revision, then CL-2 provisional capture slot
-  CL-2 -> DesignCraft/GridCraft adapters -> CL-2F API freeze
+  CL-2 -> Pliego/Celdas adapters -> CL-2F API freeze
         |
 L1  baseline harness/instrumentation + baseline-aware xtask dependency check + evidence scripts
     (0.36.2 expected-graph mode; works today; no product UI change, no new pins)
@@ -1128,7 +1128,7 @@ L2a coherent graph + compile migration (manifests, lock, patch, Id/Role/scope/Co
         |
 L2b lifecycle/root-UI hardening (tick split, monotonic clock, dropped-file queue, panel IDs,
     hidden gesture queue, CL-2F capture stress tests, both headless hosts, second-window/docking tests)
-    -- needs CL-2F (DesignCraft/GridCraft are the CL-2 pilots).
+    -- needs CL-2F (Pliego/Celdas are the CL-2 pilots).
         |
 L2c fonts/accessibility/language/IME/clipboard hardening (set_language, #8763, E21b/W27 tests,
     W15P/E4 PRIMARY matrix)
@@ -1141,7 +1141,7 @@ and winit series are published, and this plan does not invent them. `a4f9a17f`/`
 only to inspect behavior. L2a–L2d cannot be prepared as merge-ready changes until P0 exists.
 L1 can start now in 0.36.2 expected-graph mode; L2a switches the dependency check to the 0.37 P8
 graph. L2a is one atomic dependency stage: the complete egui/winit P8 graph plus the required
-craft-ui revision (CL-1 and CL-2F for the eleven `craft-ui` consumers; DesignCraft/GridCraft CL-2
+craft-ui revision (CL-1 and CL-2F for the eleven `craft-ui` consumers; Pliego/Celdas CL-2
 pilot adapters precede CL-2F). Any incompatible existing craft-ui bump belongs in that same atomic
 stage. Stock 0.37 is only the measurement control, not a production stage.
 
@@ -1177,8 +1177,8 @@ deletion or cache cleanup until the migration is abandoned or complete and evide
    available-empty distinct and explicitly sent, committed disable/enable clear, latest-pass
    authoritative `None`, current-epoch serial mismatch applying incoming edits once while outgoing
    waits, stale-epoch invalidation, bounded ≤4000-byte payload with no full-document clone — plus the
-   `TextEdit` producer and W27 adapter is not in the inspected candidate. LightCraft's built-in
-   `TextEdit` consumers inherit it, and the family's custom producers (e.g. FilmCraft
+   `TextEdit` producer and W27 adapter is not in the inspected candidate. Luz's built-in
+   `TextEdit` consumers inherit it, and the family's custom producers (e.g. Toma
    `panels/graphics.rs`) need their own logical-model adapters before family acceptance.
 3. **W15P + E4 + P2b (blocking for native PRIMARY).** The inspected E4 has an arboard fallback, not
    the required winit-owned per-seat PRIMARY path. Require the complete published P8/W15P revision
@@ -1186,8 +1186,8 @@ deletion or cache cleanup until the migration is abandoned or complete and evide
    8, owner-specific waker, stale-result cancellation), pointer- or keyboard-triggered fresh serials
    and the §4.9 native matrix.
 4. **craft-libs CL-1/CL-2F.** The capture slot exists only as a provisional CL-2 API until
-   published; LightCraft requires the frozen CL-2F API, which only exists after the
-   DesignCraft/GridCraft pilot adapters. The port sits on the reconciled
+   published; Luz requires the frozen CL-2F API, which only exists after the
+   Pliego/Celdas pilot adapters. The port sits on the reconciled
    `3832c47ef68a0e6214f2c1e85f3526b6adcb686e` base; PR 199's head and the audit merge are stale
    trees and `8614e4a`/`1764bca` are already contained in that base.
 5. **Hidden viewport children.** #8748's overdue-UI behavior is not in the inspected fork; P7c is
@@ -1269,11 +1269,11 @@ and deliverables are saved.
 | 4 | Hidden geometry-dependent controls use stale geometry; one paint request cannot carry a gesture | **Accepted.** Geometry resolves only after a fresh `layout_epoch`; each gesture step requests a hidden paint; exactly one reply, after delivery. | §4.5, §6.1 |
 | 5 | `default_fonts` loses 0.36 emoji faces | **Accepted.** Enable `monochrome_emoji_fonts`; tests cover `🙂`/`👍` and the emoji keyword fixture; ~1 MB size is measured. | §2.1, §4.8, §7.2 |
 | 6 | E4 does not provide the winit-owned PRIMARY path | **Accepted.** W15P is a prerequisite with the full native matrix; no limitation is recorded as "solved". | §1, §4.9, §10 |
-| 7 | E21b/W27 outgoing IME surrounding text missing | **Accepted.** Added as a blocking prerequisite with the built-in-`TextEdit` inheritance tests and the family custom-producer requirement (FilmCraft graphics etc.). | §4.9, §10 |
+| 7 | E21b/W27 outgoing IME surrounding text missing | **Accepted.** Added as a blocking prerequisite with the built-in-`TextEdit` inheritance tests and the family custom-producer requirement (Toma graphics etc.). | §4.9, §10 |
 | 8 | Web cannot invoke `ui.screenshot` | **Accepted.** Web `command()` only reaches `LightcraftApp::run`; browser capture plus observable commands is the workflow; no new app API unless separately reviewed. | §4.11, §8, §10 |
 | 9 | A `Cargo.lock` check cannot assert features | **Accepted.** Identity from lock/metadata; features from `cargo metadata` + `cargo tree -e features`; feature-less fixture targets that mechanism. | §5.3 |
 | 10 | `DockArea::direction` unspecified | **Accepted.** Explicit LTR policy at both call sites with unchanged persisted geometry/tab order. | §4.7, §6.1 |
-| 11 | Screenshot design does not adopt the shared completion slot | **Accepted.** LightCraft requires the frozen CL-2F helper; request paths/deadlines/replies stay app-owned. | §4.6, §9 |
+| 11 | Screenshot design does not adopt the shared completion slot | **Accepted.** Luz requires the frozen CL-2F helper; request paths/deadlines/replies stay app-owned. | §4.6, §9 |
 | 12 | Hidden-time accounting misses toasts/status and faces/denoise input | **Accepted.** One monotonic clock for toasts/status/timers; faces/denoise split into background drain vs UI-phase input. | §4.3, §4.4 |
 | 13 | Duplicate-work claim overbroad; web inbox table contradiction | **Accepted with correction.** A second pass has empty events (`InputState::begin_pass`), so event handlers cannot duplicate; the real duplicates are time-gated ticks and the double `faces::pump`. Web inbox runs every `logic` call, dropped files only in the UI phase. | §4.2, §4.4, §4.11 |
 | 14 | `Headless::step` still has the removed `Event::Screenshot` arm | **Accepted.** Both `HeadlessView::run` and `Headless::step` are updated; exactly one completion. | §4.6 |
@@ -1313,7 +1313,7 @@ open; it is not acceptance evidence.
 
 - Workspace `egui` is now `0.37` with `default-features = false` and
   `features = ["default_fonts", "monochrome_emoji_fonts"]`; `eframe` and `egui_kittest` are `0.37`
-  (`egui_extras` is declared at `0.37` although LightCraft still does not use it).
+  (`egui_extras` is declared at `0.37` although Luz still does not use it).
 - Native `eframe` adds the separate 0.37 `clipboard` feature; web keeps `default_fonts` + `glow`.
 - The workspace feature choice is what gives the CLI/headless and kittest roots their faces:
   `egui_kittest`'s own dev-dependencies do not propagate. `tests_lifecycle_037` asserts the
@@ -1377,7 +1377,7 @@ open; it is not acceptance evidence.
 
 ### IME inventory and next step
 
-LightCraft has no custom `egui::IMEOutput` producer: `TextField` wraps the built-in `TextEdit` and
+Luz has no custom `egui::IMEOutput` producer: `TextField` wraps the built-in `TextEdit` and
 every other editor uses `TextEdit`, so it will inherit the P7b/E21b logical-model/preedit/UTF-8
 producer once the reviewed egui revision is pinned. No `None` placeholder was added. The next step
 is to re-run the P7b outgoing-surrounding-text cases (deletion-only and delete+commit, preedit

@@ -1,7 +1,7 @@
 # Nikon embedded distortion corrections
 
 Nikon writes its own distortion correction into NEFs from its mirrorless bodies, in the raw SubIFD tag `0xc7d5`
-(NikonNEFInfo). LightCraft reads it for the NIKON Z 6_2 (Z 6II), the NIKON Z 8 and the NIKON Z f and turns it into an
+(NikonNEFInfo). Luz reads it for the NIKON Z 6_2 (Z 6II), the NIKON Z 8 and the NIKON Z f and turns it into an
 `OpcodeList3` `WarpRectilinear`, so it goes through the same profile correction control, optics path, orientation
 handling and DNG export as the other embedded corrections. Other bodies are left alone for now even if they have the
 same tag, because I've only checked files from these three.
@@ -14,7 +14,7 @@ Corrections.
 
 The [ExifTool Nikon tag names](https://exiftool.org/TagNames/Nikon.html) give the names of NikonNEFInfo and its
 DistortionInfo entry (`0x0005`): DistortionCorrection and RadialDistortionCoefficient1 to 3. Nothing else was taken
-from other software. The rest was worked out by comparing LightCraft's uncorrected render of each NEF with the
+from other software. The rest was worked out by comparing Luz's uncorrected render of each NEF with the
 full-size JPEG the camera embeds in it. That JPEG is always distortion-corrected with Z lenses ("On (Required)"), and
 with other lenses when Auto distortion control is on. The comparison matched textured patches between the two images
 (normalised cross-correlation on the green channel at quarter size).
