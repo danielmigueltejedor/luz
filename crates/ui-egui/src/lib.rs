@@ -9,7 +9,7 @@
 /// Where this app's releases live, for the in-app updates (`updates_ui`).
 #[cfg(not(target_arch = "wasm32"))]
 pub const UPDATE_APP: nodalia_update::App =
-    nodalia_update::App { name: "Luz", repo: "danielmigueltejedor/luz", bundle: "LightCraft.app", version: env!("CARGO_PKG_VERSION"), edition: None };
+    nodalia_update::App { name: "Luz", repo: "getnodalia/luz", bundle: "LightCraft.app", version: env!("CARGO_PKG_VERSION"), edition: None };
 
 pub mod brush_live;
 pub mod canvas_keys;

@@ -182,7 +182,7 @@ mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn the_releases_are_this_apps_own() {
-        assert_eq!(crate::UPDATE_APP.repo, "danielmigueltejedor/luz");
+        assert_eq!(crate::UPDATE_APP.repo, "getnodalia/luz");
         assert_eq!(crate::UPDATE_APP.version, env!("CARGO_PKG_VERSION"));
     }
 
@@ -196,7 +196,7 @@ mod tests {
             tag: "v99.0.0".into(),
             version: "99.0.0".into(),
             notes: String::new(),
-            page: "https://github.com/danielmigueltejedor/luz/releases/tag/v99.0.0".into(),
+            page: "https://github.com/getnodalia/luz/releases/tag/v99.0.0".into(),
             asset: None,
         });
         let frame = |app: &mut LightcraftApp, events: Vec<egui::Event>| {
