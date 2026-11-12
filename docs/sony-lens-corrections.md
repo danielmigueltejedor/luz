@@ -7,7 +7,7 @@ convention; that page's *Two conventions* section has the comparison and what wo
 
 Sony ARWs record three lens corrections per shot in the raw image IFD: shading (vignetting), lateral chromatic
 aberration (CA) and distortion, each as a camera setting and a radial table, with copies in the encrypted
-`SR2SubIFD`. LightCraft **decodes all three** wherever a file carries them and applies distortion here on three validated
+`SR2SubIFD`. Luz **decodes all three** wherever a file carries them and applies distortion here on three validated
 bodies: **ILCE-7RM4A (A7R IVA)**, **ILCE-7M3 (A7 III)** and **ILCE-7CR (A7CR)**. The A7R IVA keeps its existing Bayer 3:2 conversion,
 validated with the FE 24-105mm F4 G OSS and FE 200-600mm F5.6-6.3 G OSS; the A7 III uses the same conversion, validated
 with the FE 16-35mm F4 ZA OSS, FE 28-70mm F3.5-5.6 OSS and FE 50mm F1.8 ([ILCE-7M3 validation](#ilce-7m3-validation)). The A7CR uses a separate conversion,
@@ -22,7 +22,7 @@ and non-3:2 camera crops are excluded pending validation. An aspect crop may ret
 normalization; the decoder does not guess that relationship. Tables of other lengths and rejected tables remain
 uncorrected, and a table found only in the encrypted `SR2SubIFD` is never applied. The camera's distortion Off
 setting does not erase its table. A7CR Off, missing, unavailable and unknown settings produce no warp. The A7R IVA's
-existing behavior is unchanged. Newly imported photos use LightCraft's existing embedded-profile default
+existing behavior is unchanged. Newly imported photos use Luz's existing embedded-profile default
 (enabled); the profile correction control can disable or adjust it.
 
 ## What is decoded
@@ -251,7 +251,7 @@ from the interpolated file table was below 0.12 px at 1440 px. That measures app
 not agreement with an independent renderer. Camera JPEG and Apple Core Image comparisons support
 the wide-lens interpretation but are weaker evidence than same-renderer On/Off pairs.
 
-Historical validation before restoring main's image crop precedence: LightCraft exports with the
+Historical validation before restoring main's image crop precedence: Luz exports with the
 standard default crop framing were compared directly with Sony's corrected
 TIFFs. At 2376 px wide, median / 95th-percentile feature residuals were 0.35 / 1.04 px at 24 mm,
 0.15 / 0.40 px at 200 mm, and 0.13 / 0.56 px at 600 mm (median translation below 0.024 px).
@@ -298,14 +298,14 @@ ILCE-7M3 (26 in the table below, plus two left out as explained under it): a che
 uncompressed raws, apertures from wide open to f/8, plus one textured wall. Tables covered strong barrel (16 mm,
 −690 at the corner), strong pincushion (70 mm, +1161) and the sign change between them.
 
-Method (`tools/sony_distortion_check.py`): LightCraft renders each ARW at full size with the profile correction
+Method (`tools/sony_distortion_check.py`): Luz renders each ARW at full size with the profile correction
 on and off; sub-pixel board corners (Hessian saddle points refined with `cornerSubPix`, kept only where the four
 quadrants alternate, labelled into rows and columns) are matched with the JPEG's by grid position, with the
 match fixed by the central corners before any fit, because a board is periodic. A similarity (zoom, rotation,
 shift) is fitted, as the camera fills its frame with its own zoom; no lens coefficient is fitted. The textured wall
 uses SIFT matches instead. The script was checked on synthetic boards with a known radial distortion.
 
-| Lens / focal length | Shots | Corrected vs JPEG: median / p95 (px at 6000) | Uncorrected median | Corner (r > 0.9) | Camera / LightCraft correction |
+| Lens / focal length | Shots | Corrected vs JPEG: median / p95 (px at 6000) | Uncorrected median | Corner (r > 0.9) | Camera / Luz correction |
 |---|---:|---|---:|---:|---:|
 | FE 16–35 F4 ZA / 16 mm | 10 | 0.33–0.38 / 1.01–1.15 | 16.7–17.0 | 1.40–1.56 px | 1.02 |
 | FE 16–35 F4 ZA / 20 mm | 4 | 0.16–0.24 / 0.34–0.50 | 3.9–4.4 | 0.15–0.24 px | 0.98 |
@@ -319,7 +319,7 @@ uses SIFT matches instead. The script was checked on synthetic boards with a kno
 
 Residuals are in pixels of the 6000×4000 JPEG; at the 2376 px exports used above for the ILCE-7RM4A, the
 board medians are 0.02–0.17 px and the p95 at most 0.46 px. The last column fits JPEG ≈ uncorrected +
-α·(corrected − uncorrected) radially: LightCraft applies the camera's amount of correction within 2 %, slightly
+α·(corrected − uncorrected) radially: Luz applies the camera's amount of correction within 2 %, slightly
 less for strong barrel and slightly more at 20 mm, which is what remains at the 16 mm corners (about 1.5 px of a
 35 px correction). Rows and columns of corrected boards are as straight as in the JPEG in every shot (largest
 bow 0.8–7.8 px in both, from the screens), against 7–55 px uncorrected. Compressed and uncompressed raws,

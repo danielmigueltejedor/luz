@@ -8,7 +8,7 @@ run time, never bundled and never committed. Adobe LCP profiles are never used.
 ## Setup: one click
 
 1. Nothing is downloaded without the user's click. On the first launch the desktop app asks once: "Download lens
-   profiles? LightCraft can correct distortion and vignetting for many lenses using the open lens database
+   profiles? Luz can correct distortion and vignetting for many lenses using the open lens database
    (lensfun, about N MB)", with **Download** and **Not Now** (N is the pinned files' sizes added up). Not Now (or
    Esc) downloads nothing and the app doesn't ask again; Settings ▸ General ▸ Lens profiles has **Download Lens
    Database** and a switch that turns the offer back on. The answer is kept with the app's settings (`ui.json`,
@@ -26,7 +26,7 @@ run time, never bundled and never committed. Adobe LCP profiles are never used.
    The CLI (`render`, `merge`, `snapshot`) and the headless MCP server read this folder too, but never ask and never
    fetch on their own; `lens.downloadDatabase` fetches it on request from any of them.
 2. By default the files come from lensfun's GitHub repository at the pinned commit. `LIGHTCRAFT_LENSFUN_URL` lists
-   other places serving the same files (base URLs, tried first), e.g. a copy on LightCraft's own server.
+   other places serving the same files (base URLs, tried first), e.g. a copy on Luz's own server.
 3. `LIGHTCRAFT_LENSFUN_DIR` points at a database of your own instead (lensfun's `data/db`, or a Linux
    distribution's `/usr/share/lensfun/version_1/`); then the app doesn't offer the download, and that folder is read
    even after `lens.downloadDatabase` fetches the app's own copy.

@@ -1,11 +1,11 @@
 # AI masks (Object and Describe)
 
-LightCraft selects objects with **SAM 3** (Segment Anything with Concepts, Meta 2025), run in
+Luz selects objects with **SAM 3** (Segment Anything with Concepts, Meta 2025), run in
 pure Rust by `crates/segment` on [candle](https://github.com/huggingface/candle): on the GPU
 through Metal on macOS, on the CPU elsewhere (for now). If the Mac's GPU can't run it, it runs on
 the CPU (see the worker below).
 
-**The model is optional.** It is not part of LightCraft, and nothing requires it: without it,
+**The model is optional.** It is not part of Luz, and nothing requires it: without it,
 Object and Describe offer to download it, every other feature (and every existing mask, see
 below) works, and no render, export or command ever waits for it.
 
@@ -64,10 +64,10 @@ as described below, then run:
 
 ```sh
 cargo build --release --locked -p lightcraft-segment --bin lightcraft-sam3-worker
-target/release/lightcraft-sam3-worker "$HOME/Library/Application Support/LightCraft/models/sam3" 127.0.0.1:8793
+target/release/lightcraft-sam3-worker "$HOME/Library/Application Support/Luz/models/sam3" 127.0.0.1:8793
 ```
 
-On the editing computer, start an SSH tunnel in one terminal and LightCraft in another:
+On the editing computer, start an SSH tunnel in one terminal and Luz in another:
 
 ```sh
 ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:8793:127.0.0.1:8793 user@your-mac
@@ -96,11 +96,11 @@ not RAW development, denoising, or upscaling. The model licence below still appl
 
 ### In the app (recommended)
 
-The first time you pick Object or Describe without the model, LightCraft asks:
+The first time you pick Object or Describe without the model, Luz asks:
 
 > **Download the SAM 3 model?** Object and Describe masks use SAM 3, Meta's segmentation model.
-> It isn't part of LightCraft, and everything else works without it. Download it once (about
-> 3.4 GB) · *folder*. Licence: SAM License (Meta) — Meta's terms, not LightCraft's. Downloading
+> It isn't part of Luz, and everything else works without it. Download it once (about
+> 3.4 GB) · *folder*. Licence: SAM License (Meta) — Meta's terms, not Luz's. Downloading
 > it means accepting them. [Read the SAM License] — **Not Now** / **Download**
 
 Nothing is downloaded until you choose **Download**. The download runs in the background (close
@@ -109,7 +109,7 @@ where it stopped if interrupted (also after quitting), and tries the next downlo
 one fails or stalls. Each file is written as `<name>.part` and moved into the model folder only
 when complete and verified — `model.safetensors` must have the exact size and SHA-256 of Meta's
 official checkpoint; a file that doesn't match is deleted, never used. If no location works, the
-dialog says why and LightCraft carries on without the model.
+dialog says why and Luz carries on without the model.
 
 Agents and scripts use the same commands (control channel, `lightcraft-cli mcp --connect`):
 `segment.model.status`, `segment.model.download {"acknowledged": true}` (refused without the
@@ -122,12 +122,12 @@ The model is fetched from an ordered list of mirrors: base URLs where `<base>/mo
 `<base>/vocab.json` and `<base>/merges.txt` live. The list is, in order:
 
 1. `LIGHTCRAFT_SAM3_MIRRORS` (environment variable; URLs separated by commas or spaces);
-2. the file `models/sam3-mirrors.txt` in LightCraft's settings folder (one URL per line, `#`
-   comments) — `~/Library/Application Support/LightCraft/` (macOS), `%APPDATA%\LightCraft\`
+2. the file `models/sam3-mirrors.txt` in Luz's settings folder (one URL per line, `#`
+   comments) — `~/Library/Application Support/Luz/` (macOS), `%APPDATA%\Luz\`
    (Windows), `~/.config/lightcraft/` (Linux);
 3. the built-in list, `DEFAULT_MIRRORS` in `crates/segment/src/fetch.rs`.
 
-> **Maintainers:** the built-in list is **empty** until LightCraft's own CDN locations exist
+> **Maintainers:** the built-in list is **empty** until Luz's own CDN locations exist
 > (see the `TODO(maintainer)` there): add them in order of preference, host the three files
 > unchanged, and pin `vocab.json` / `merges.txt` (size + SHA-256) in `SAM3_FILES` at the same
 > time. Until then the in-app download needs a user-configured mirror, and the dialog says so:
@@ -155,7 +155,7 @@ the Mozilla root certificates; no OpenSSL, `ring` or `aws-lc`, nothing compiled 
 Put `model.safetensors`, `vocab.json` and `merges.txt` from `facebook/sam3` in the model folder:
 `models/sam3/` in the settings folder above, or the folder `LIGHTCRAFT_SAM3_DIR` names. It must be
 the Hugging Face format (3,439,938,512 bytes): `sam3.safetensors` from community mirrors, renamed, is
-Meta's original checkpoint, and LightCraft says so instead of loading it. Developers
+Meta's original checkpoint, and Luz says so instead of loading it. Developers
 can use the installer scripts, which download from Hugging Face with your token and verify the
 weights:
 
@@ -170,7 +170,7 @@ $env:HF_TOKEN = "hf_..."; .\tools\install-sam3.ps1   # Windows
 
 ## Licence of the model
 
-LightCraft's code is MIT OR Apache-2.0; `crates/segment` (a port of Apache-2.0 code) is
+Luz's code is MIT OR Apache-2.0; `crates/segment` (a port of Apache-2.0 code) is
 Apache-2.0. **The SAM 3 weights are neither**: they are Meta's, released under the **SAM
 License** (<https://github.com/facebookresearch/sam3/blob/main/LICENSE>), a custom licence that
 is not an OSI open-source licence. It grants a non-exclusive, worldwide, non-transferable,
@@ -210,7 +210,7 @@ Therefore:
 `download` is `{running, done, total, file, error, cancelled, finished}`: `cancelled` is true when the last
 download was cancelled (its `error` says so in words; decide on the flag). An AI mask command refused because
 the model is not installed (or still downloading) fails with an error that starts with "The SAM 3 model is
-not installed"; inside LightCraft it is `ErrorKind::ModelMissing(Sam3)`, which is what the app offers the
+not installed"; inside Luz it is `ErrorKind::ModelMissing(Sam3)`, which is what the app offers the
 download on.
 
 Coordinates are normalized to the uncropped, oriented photo, like every mask shape. `seg` passes
@@ -243,7 +243,7 @@ wait and return the result (when built with the `sam` feature; the default CLI h
   error and the model is reloaded on the next request; busy counters are reset by drop guards.
 - GPU fallback (issue #1974): a job that fails on the GPU (a panic or a candle error, e.g. an
   AMD GPU in an Intel Mac whose Metal compiler crashes on a matmul kernel) frees the model and runs
-  once more on the CPU. If that works, the model stays on the CPU until LightCraft restarts and
+  once more on the CPU. If that works, the model stays on the CPU until Luz restarts and
   the user is told once ("The GPU couldn't run the AI mask model…"); if the CPU fails too, the
   error is reported and the next job tries the GPU again. Missing or damaged model files and
   remote-worker errors are not retried. `LIGHTCRAFT_GPU=0` or `LIGHTCRAFT_GPU_BACKEND=off` keep

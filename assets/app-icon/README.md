@@ -35,7 +35,7 @@ hicolor PNG, so it has the Linux margin and shadow.
 
 The app id is `ai.storyteller.lightcraft`: the Wayland app id and the `.desktop` file
 (`packaging/linux/ai.storyteller.lightcraft.desktop`). Its `Icon=` is the Nodalia name, `dev.danielmiguelt.Luz`,
-so an icon theme can tell Luz from the Craft app that shares the id; `packaging/linux/package.sh` installs the
+so an icon theme can tell Luz from the Nodalia app that shares the id; `packaging/linux/package.sh` installs the
 hicolor icons under both names, and the Flatpak keeps the app id as the icon name because Flatpak only exports
 icons named after it. To install by hand, copy the contents of `hicolor/` into `/usr/share/icons/hicolor/`
 (`cp -R hicolor/. /usr/share/icons/hicolor/`, or `~/.local/share/icons/hicolor/`), copy each `ai.storyteller.lightcraft.*` there to `dev.danielmiguelt.Luz.*`, and put

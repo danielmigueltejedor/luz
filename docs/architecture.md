@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-10-10 · **Target:** Adobe Lightroom Classic 15.5 / Lightroom 9.6 · **Changes:** [revision history](#revision-history)
 
-How LightCraft is built today. The longer design document (`plan/architecture.md`) is local-only
+How Luz is built today. The longer design document (`plan/architecture.md`) is local-only
 (`plan/` is gitignored); this page is the committed, current summary. Sizes are Rust lines counted
 on 2026-10-10 (≈ 202,000 tracked lines in 505 files: 24 library crates, 3 apps and `xtask`).
 

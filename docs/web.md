@@ -1,4 +1,4 @@
-# LightCraft in the browser
+# Luz in the browser
 
 `apps/lightcraft-web` runs the same egui UI as the desktop app (`crates/ui-egui`) in the browser,
 compiled to WebAssembly and drawn with WebGL2 (eframe's `glow` backend).
@@ -131,7 +131,7 @@ are the same in every version, so serve them with `Cache-Control: no-cache` (not
   - A picked or dropped photo whose bytes can't be stored is not added (it would be gone after
     a reload); a notice says why.
   - One tab at a time: the page holds a Web Lock (`navigator.locks`, `lightcraft-library`); a
-    second tab or window shows "LightCraft is already open in another tab" instead of loading
+    second tab or window shows "Luz is already open in another tab" instead of loading
     its own copy (two copies would overwrite each other's saves). Browsers without Web Locks, or
     that refuse the lock request, aren't protected: the app starts without the guard.
   - If the stored library can't be opened, a notice says the session is temporary and nothing
@@ -162,9 +162,9 @@ are the same in every version, so serve them with `Cache-Control: no-cache` (not
   (no params: a command that takes photo ids then acts on the selection). Any other text that
   isn't an object rejects the promise and runs nothing, as the control channel and MCP do, so a
   typo can't run a command on the selection. This is how the headless-Chrome checks drive the page.
-- **Embedding (`?host=parent`).** A same-origin page framing LightCraft in an `<iframe>` speaks
-  to it over `postMessage`, the protocol PdfCraft, GridCraft and DeckCraft share
-  (`apps/lightcraft-web/src/host.rs`, issue #2270). LightCraft posts `lightcraft:ready`
+- **Embedding (`?host=parent`).** A same-origin page framing Luz in an `<iframe>` speaks
+  to it over `postMessage`, the protocol Papel, Celdas and Lámina share
+  (`apps/lightcraft-web/src/host.rs`, issue #2270). Luz posts `lightcraft:ready`
   `{version}` once it listens (`lightcraft:failed` `{error}` if it couldn't start); the page sends
   `lightcraft:open` `{name, bytes}` to add a photo (as one dropped on the window; `name` gives the
   format) and `lightcraft:cmd` `{id, params}` to run a command, answered by `lightcraft:response`
@@ -178,17 +178,17 @@ are the same in every version, so serve them with `Cache-Control: no-cache` (not
   answered. A page with an opaque origin (`"null"`: a sandboxed iframe, a `data:` page), or a
   parent on another origin, gets no bridge, and exports keep downloading. The library still lives
   in the iframe's browser storage.
-- **Embedding in the page's own document (`data-host="page"`).** A page that loads LightCraft into its own
+- **Embedding in the page's own document (`data-host="page"`).** A page that loads Luz into its own
   document, with no iframe, puts `data-host="page"` on the app's canvas. The same messages then travel as
-  non-bubbling `CustomEvent`s on the canvas: LightCraft dispatches `lightcraft:ready`, `lightcraft:failed`,
+  non-bubbling `CustomEvent`s on the canvas: Luz dispatches `lightcraft:ready`, `lightcraft:failed`,
   `lightcraft:dirty`, `lightcraft:save` and `lightcraft:response` with the message's fields as `detail`, and the page
   dispatches `lightcraft:open` and `lightcraft:cmd` on the canvas (`detail` is the fields; the event name is the
   type). Add the listeners before the module starts, because `lightcraft:ready` is sent as soon as the app listens.
   Only the exact value `page` turns it on. When the page asks for both, `?host=parent` wins. In this mode the page
-  and LightCraft share one document, so any script on the page can drive the app and receive what it saves: use it
+  and Luz share one document, so any script on the page can drive the app and receive what it saves: use it
   only on a page you control. A photo handed in is held to the same size limit as in the iframe mode and refused
   before its bytes are copied.
-- **The page title names the open photo**: `<file name> — LightCraft`, with ` •` after the name while
+- **The page title names the open photo**: `<file name> — Luz`, with ` •` after the name while
   changes are not yet written to browser storage (`LightcraftApp::page_title`). eframe's web runner
   ignores the window title the desktop app sets, and a host that embeds the page reads this title to
   tell which photo a drop opened and whether it is saved (issue #2397).
