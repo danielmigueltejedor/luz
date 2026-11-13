@@ -27,7 +27,7 @@ concurrency:
 jobs:
   windows-scope:
     if: github.event.action != 'labeled' || github.event.label.name == 'full-ci'
-    uses: storytold/craft-common-actions/.github/workflows/changed-paths.yml@main
+    uses: getnodalia/foundation/.github/workflows/changed-paths.yml@976581262c95c0d95c0184149c0e1ba55485ccb3 # foundation main
     with:
       label: full-ci
       # The crates and files with `cfg(windows)` code, and what decides how they build: their
@@ -63,12 +63,12 @@ jobs:
   gate-windows:
     needs: windows-scope
     if: needs.windows-scope.outputs.matched == 'true'
-    # Tracks @main so suite-wide CI fixes reach every app without a PR in each repository.
-    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    uses: getnodalia/foundation/.github/workflows/rust-gate.yml@976581262c95c0d95c0184149c0e1ba55485ccb3 # foundation main
     with:
       os: '["windows-latest"]'
       # Same craft-fonts commit as ci.yml and release.yml.
-      craft-fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+      fonts-repository: getnodalia/foundation
+      fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
       targets: ""
       tools: ""
       timeout-minutes: 90
