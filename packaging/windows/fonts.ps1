@@ -8,7 +8,7 @@ function Initialize-CraftFonts([string] $WorkspaceRoot) {
     # Same revision as release.yml and packaging/fonts.sh. Existing checkouts stay untouched.
     $revision = 'b076417b5880bd4154bd22f00695b1d28c6bea83'
     Write-Output "==> downloading craft-fonts ($revision) to $fontDir"
-    & git clone --no-checkout https://github.com/storytold/craft-fonts $fontDir
+    & git clone --no-checkout --single-branch --branch vendor/craft-fonts/main https://github.com/getnodalia/foundation $fontDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not download craft-fonts; provide a complete checkout with CRAFT_FONTS_DIR' }
     & git -C $fontDir checkout --detach $revision
     if ($LASTEXITCODE -ne 0) { throw 'Could not check out craft-fonts; provide a complete checkout with CRAFT_FONTS_DIR' }
