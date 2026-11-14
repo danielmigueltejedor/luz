@@ -13,3 +13,5 @@ NODALIA_MIGRATION.md
 .github/pull_request_template.md
 .github/ISSUE_TEMPLATE/**
 .github/PULL_REQUEST_TEMPLATE.md
+.github/CODEOWNERS
+CONTRIBUTING.md
