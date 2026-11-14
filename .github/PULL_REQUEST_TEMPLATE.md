@@ -67,3 +67,7 @@ Fixes #
 - [ ] New code has a caller: no command, module or setting that nothing reaches yet
 - [ ] Every new image, icon or other asset has its entry in `assets/ATTRIBUTION.md`; no font or media files added
 - [ ] Ready to merge (otherwise open it as a draft)
+
+## Compatibility and release impact
+
+<!-- Note affected platforms, migrations or distribution changes when applicable. -->
