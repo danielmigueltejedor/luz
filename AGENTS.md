@@ -105,7 +105,7 @@ of it.
   ships Noto Sans CJK SC Regular as a separate asset loaded by the UI before startup. The UI
   (`theme::font_definitions`) and the export watermark renderer use CJK faces (picked by script) as fallbacks after Inter; the UI also falls back on the faces of other scripts (Thai, Arabic, …). Unset,
   `CRAFT_FONTS` is empty: everything builds, tests and runs, but Chinese and Japanese text lack glyphs. Releases always build
-  with it (`release.yml`, `CRAFT_FONTS_REQUIRED=1`) and ship the fonts' OFL licences. Tests that need these fonts skip
+  with it (the `release-*.yml` workflows, `CRAFT_FONTS_REQUIRED=1`) and ship the fonts' OFL licences. Tests that need these fonts skip
   without it; the FreeBSD CI job runs them with it.
 - Icons drawn in code (e.g. `crates/ui-egui/src/icons.rs`) are original work and are recorded in `assets/ATTRIBUTION.md` as such; do not trace them from Adobe icons.
 - Demo/test images: generated procedurally by `lightcraft-scenes`, or CC0 downloads kept in the gitignored `corpus/` with their source recorded. Screenshots of Adobe apps live only in the gitignored `plan/` and are never committed or published.
@@ -223,4 +223,4 @@ The sections above are this repository's rules. With them:
 
 ## Release
 
-`release.yml` runs on a push to the `release` branch and drafts the release; a maintainer reviews the draft and publishes it. It still calls the inherited release workflow (see `NODALIA_MIGRATION.md`).
+Merging a version bump with its notes (`docs/release-notes/vX.Y.Z.md`, format in that folder's README) releases it: `release-auto.yml` tags the merge through Foundation's `release-tag`, builds the packages with `release-linux.yml`, `release-macos.yml` (DMG on a standard macOS runner) and `release-windows.yml`, and publishes the release. Nobody pushes a tag by hand.
